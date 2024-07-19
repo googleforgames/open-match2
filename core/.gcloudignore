@@ -1,0 +1,9 @@
+.git
+.gitignore
+.gcloudignore
+.golangci.yaml
+cloudbuild.yaml
+*.md
+json
+bak
+core

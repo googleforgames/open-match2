@@ -1,0 +1,29 @@
+# This looks a bit convoluted, but basically: it uses cloud build's ephemeral
+# VM to compile our proto files, and then copies the output to a GCS bucket 
+# where it can be easily retrieved.
+#
+# Why not just run the steps in the Dockerfile here in the cloud build file? 
+#   Because we want is a build process that runs on both cloud build and a local docker daemon
+#   with identical output. 
+# Why do we want to run it in docker?
+#   Because we don't want developers who want to compile from source to have to make a
+#   build-specific VM or reconfigure their local dev environment for protoc builds. This way
+#   devs can just run these same three docker steps below to get the output files and not
+#   have any changes to their local machine or VMs to clean up.
+steps:
+- id: 'Compile protocol buffers'
+  name: 'gcr.io/cloud-builders/docker'
+  args: [ 'build', '-t', 'om-protoc:latest', '.' ]
+- id: 'Run container to access output directory'
+  name: 'gcr.io/cloud-builders/docker'
+  args: [ 'run', '--name', 'build', 'om-protoc:latest' ]
+- id: 'Copy files from output directory'
+  name: 'gcr.io/cloud-builders/docker'
+  args: [ 'cp', 'build:/workspace/.', '.' ]
+artifacts:
+  objects:
+    location: gs://om-proto/
+    paths:
+      - '*.pb.go'         # golang modules generated from the protobufs
+      - '*.pb.gw.go'      # http reverse-proxy generated from the protobufs (courtesy of grpc-gateway)
+      - '*.swagger.json'  # OpenAPIv2 swagger definitions generated from the protobufs (courtesy of grpc-gateway)

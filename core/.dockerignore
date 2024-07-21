@@ -1,0 +1,8 @@
+.dockerignore
+.git
+.gitignore
+Dockerfile
+skaffold.yaml
+cloudbuild.yaml
+README.yaml
+deploy/

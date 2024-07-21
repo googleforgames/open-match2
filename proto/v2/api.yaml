@@ -1,0 +1,30 @@
+type: google.api.Service
+config_version: 3
+name: Open Match 
+title: Open Match Core
+
+http:
+  rules:
+    - selector: open_match.v2.OpenMatchService.CreateTicket
+      post: /v2/tickets
+      body: "*"
+
+    - selector: open_match.v2.OpenMatchService.DeactivateTickets
+      delete: /v2/tickets:deactivate
+      body: "*"
+
+    - selector: open_match.v2.OpenMatchService.ActivateTickets
+      post: /v2/tickets:activate
+      body: "*"
+
+    - selector: open_match.v2.OpenMatchService.InvokeMatchmakingFunctions
+      post: /v2/matches:fetch
+      body: "*"
+
+    - selector: open_match.v2.OpenMatchService.CreateAssignments
+      post: /v2/assignments:create
+      body: "*"
+
+    - selector: open_match.v2.OpenMatchService.WatchAssignments
+      post: /v2/assignments:watch
+      body: "*"

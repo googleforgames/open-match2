@@ -1,0 +1,3 @@
+linters:
+  disable:
+    - staticcheck # not sure why, but this linter panics 

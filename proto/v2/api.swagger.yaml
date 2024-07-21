@@ -1,0 +1,31 @@
+openapiOptions:
+  file:
+    - file: "api.proto"
+      option:
+        info:
+          title: Open Match
+          version: "2.0"
+          contact:
+            name: Open Match
+            url: https://open-match.dev
+            email: open-match-discuss@googlegroups.com
+          license:
+            name: Apache 2.0 License
+            url: https://github.com/googleforgames/open-match/blob/master/LICENSE
+        external_docs:
+          url: "https://open-match.dev/site/docs/"
+          description: "Open Match Documentation"
+        schemes:
+          - HTTP
+          - HTTPS
+        consumes:
+          - "application/json"
+        produces:
+          - "application/json"
+        responses:
+          "404":
+            description: "Returned when the resource does not exist."
+            schema:
+              json_schema:
+                type:
+                  - STRING

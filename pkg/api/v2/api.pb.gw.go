@@ -21,7 +21,7 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
-	extV2 "open-match.dev/pkg/pb/v2"
+	extV2 "open-match.dev/open-match2/pkg/pb/v2"
 )
 
 // Suppress "imported and not used" errors
@@ -182,6 +182,7 @@ func request_OpenMatchService_WatchAssignments_0(ctx context.Context, marshaler 
 // UnaryRPC     :call OpenMatchServiceServer directly.
 // StreamingRPC :currently unsupported pending https://github.com/grpc/grpc-go/issues/906.
 // Note that using this registration option will cause many gRPC library features to stop working. Consider using RegisterOpenMatchServiceHandlerFromEndpoint instead.
+// GRPC interceptors will not work for this type of registration. To use interceptors, you must use the "runtime.WithMiddlewares" option in the "runtime.NewServeMux" call.
 func RegisterOpenMatchServiceHandlerServer(ctx context.Context, mux *runtime.ServeMux, server extV2.OpenMatchServiceServer) error {
 
 	mux.Handle("POST", pattern_OpenMatchService_CreateTicket_0, func(w http.ResponseWriter, req *http.Request, pathParams map[string]string) {
@@ -336,7 +337,7 @@ func RegisterOpenMatchServiceHandler(ctx context.Context, mux *runtime.ServeMux,
 // to "mux". The handlers forward requests to the grpc endpoint over the given implementation of "extV2.OpenMatchServiceClient".
 // Note: the gRPC framework executes interceptors within the gRPC handler. If the passed in "extV2.OpenMatchServiceClient"
 // doesn't go through the normal gRPC flow (creating a gRPC client etc.) then it will be up to the passed in
-// "extV2.OpenMatchServiceClient" to call the correct interceptors.
+// "extV2.OpenMatchServiceClient" to call the correct interceptors. This client ignores the HTTP middlewares.
 func RegisterOpenMatchServiceHandlerClient(ctx context.Context, mux *runtime.ServeMux, client extV2.OpenMatchServiceClient) error {
 
 	mux.Handle("POST", pattern_OpenMatchService_CreateTicket_0, func(w http.ResponseWriter, req *http.Request, pathParams map[string]string) {

@@ -19,7 +19,7 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	pb "open-match.dev/pkg/pb/v2"
+	pb "open-match.dev/open-match2/pkg/pb/v2"
 )
 
 var (

@@ -20,7 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"open-match.dev/core/internal/filter/testcases"
-	pb "open-match.dev/pkg/pb/v2"
+	pb "open-match.dev/open-match2/pkg/pb/v2"
 )
 
 // TestMeetsCriteria validates that tickets are correctly included/excluded

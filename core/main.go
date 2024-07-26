@@ -50,10 +50,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	//_ "net/http"       // Debug.
-	//_ "net/http/pprof" // Debug.
-
-	pb "open-match.dev/pkg/pb/v2"
+	pb "open-match.dev/open-match2/pkg/pb/v2"
 
 	"github.com/davecgh/go-spew/spew"
 	"github.com/pkg/errors"
@@ -95,12 +92,6 @@ var (
 )
 
 func main() {
-
-	// DEBUG serve the http/pprof module debug endpoint
-	//go func() {
-	//	logger.Print(http.ListenAndServe("localhost:2224", nil))
-	//}()
-
 	// Read configuration env vars, and configure logging
 	cfg = config.Read()
 	logging.ConfigureLogging(cfg)

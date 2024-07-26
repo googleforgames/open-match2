@@ -1,4 +1,4 @@
-module open-match.dev/pkg/pb/v2
+module open-match.dev/open-match2/pkg/pb/v2
 
 go 1.21.5
 

@@ -22,7 +22,7 @@
 syntax = "proto3";
 package open_match.v2; // would be nice to match the domain name, alas: https://stackoverflow.com/a/63228588
 option go_package = "open-match.dev/open-match2/pkg/pb/v2";
-option csharp_namespace = "OpenMatch";
+option csharp_namespace = "OpenMatch2";
 
 import "messages.proto";
 

@@ -36,8 +36,8 @@
 
 syntax = "proto3";
 package open_match.v2;
-option go_package = "open-match.dev/open-match-2/pkg/pb/v2";
-option csharp_namespace = "OpenMatch";
+option go_package = "open-match.dev/open-match2/pkg/pb/v2";
+option csharp_namespace = "OpenMatch2";
 
 //import "google/rpc/status.proto";
 import "google/protobuf/any.proto";

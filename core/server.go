@@ -31,12 +31,12 @@ import (
 	"google.golang.org/grpc/stats"
 	"google.golang.org/grpc/status"
 
-	pb "open-match.dev/pkg/pb/v2"
+	pb "open-match.dev/open-match2/pkg/pb/v2"
 
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"github.com/spf13/viper"
 
-	gw "open-match.dev/pkg/api/v2"
+	gw "open-match.dev/open-match2/pkg/api/v2"
 )
 
 // start brings up the gRPC server, based on the configuration.

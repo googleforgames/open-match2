@@ -33,7 +33,7 @@ spec:
         - name: OM_REDIS_WRITE_HOST
           value: 10.67.230.244
         - name: OM_REDIS_READ_HOST
-          value: 10.67.230.245
+          value: 10.67.230.244
       - image: asia-northeast1-docker.pkg.dev/open-match-dev/open-match/otel-collector-sidecar
         name: opentelemetry-collector
         startupProbe:

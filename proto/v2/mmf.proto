@@ -14,7 +14,7 @@
 
 syntax = "proto3";
 package open_match.v2;
-option go_package = "open-match.dev/pkg/pb/v2";
+option go_package = "open-match.dev/open-match2/pkg/pb/v2";
 option csharp_namespace = "OpenMatch";
 
 import "messages.proto";

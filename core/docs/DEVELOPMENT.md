@@ -41,7 +41,9 @@ The `proto` directory contains the protocol buffer definition files and document
 probably want to write your Matchmaking Functions ('MMFs') in a language you're comfortable in, so you'll want to use `protoc` to generate libraries in your preferred language.
 
 ## Testing
-You can run the golang unit tests using `go test ./...` from the `core` directory. If you want to test ticket creation against a running copy of `om-core`, the file `docs/example_ticket.json` has an example of a JSON-formatted ticket that will pass validation against the `v2/tickets` RESTful HTTP API endpoint with a command like this:
+You can run the golang unit tests using `go test ./...` from the `core` directory. 
+
+If you want to quickly test a running copy of `om-core`, the file `docs/example_ticket.json` has an example of a JSON-formatted ticket that will pass validation against the `v2/tickets` RESTful HTTP API endpoint with a command like this:
 ```
 curl -H "Authorization: Bearer $(gcloud auth print-identity-token)" \
 -d "$(jq -c . example_ticket.json)" ${URL}/v2/tickets

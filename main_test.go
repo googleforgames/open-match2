@@ -33,10 +33,10 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
-	"open-match.dev/open-match2/core/internal/config"
-	"open-match.dev/open-match2/core/internal/statestore/cache"
-	memoryReplicator "open-match.dev/open-match2/core/internal/statestore/memory"
-	redisReplicator "open-match.dev/open-match2/core/internal/statestore/redis"
+	"github.com/googleforgames/open-match2/internal/config"
+	"github.com/googleforgames/open-match2/internal/statestore/cache"
+	memoryReplicator "github.com/googleforgames/open-match2/internal/statestore/memory"
+	redisReplicator "github.com/googleforgames/open-match2/internal/statestore/redis"
 	pb "open-match.dev/open-match2/pkg/pb"
 )
 

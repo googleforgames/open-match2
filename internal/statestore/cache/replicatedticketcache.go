@@ -27,7 +27,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
-	store "open-match.dev/open-match2/core/internal/statestore/datatypes"
+	store "github.com/googleforgames/open-match2/internal/statestore/datatypes"
 )
 
 var (

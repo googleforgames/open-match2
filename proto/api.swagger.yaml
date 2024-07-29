@@ -21,11 +21,11 @@ openapiOptions:
           version: "2.0"
           contact:
             name: Open Match
-            url: https://open-match.dev
+            url: https://open-match.dev/open-match2
             email: open-match-discuss@googlegroups.com
           license:
             name: Apache 2.0 License
-            url: https://github.com/googleforgames/open-match/blob/master/LICENSE
+            url: https://github.com/googleforgames/open-match2/blob/master/LICENSE
         external_docs:
           url: "https://open-match.dev/site/docs/"
           description: "Open Match Documentation"

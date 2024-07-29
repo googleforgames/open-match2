@@ -36,7 +36,7 @@ steps:
   args: [ 'cp', 'build:/workspace/.', '.' ]
 artifacts:
   objects:
-    location: gs://om-proto/
+    location: gs://i3wvv6uhbpis/
     paths:
       - '*.pb.go'         # golang modules generated from the protobufs
       - '*.pb.gw.go'      # http reverse-proxy generated from the protobufs (courtesy of grpc-gateway)

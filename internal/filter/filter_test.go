@@ -19,7 +19,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/timestamppb"
-	"open-match.dev/open-match2/core/internal/filter/testcases"
+	"github.com/googleforgames/open-match2/internal/filter/testcases"
 	pb "open-match.dev/open-match2/pkg/pb"
 )
 

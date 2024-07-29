@@ -20,8 +20,8 @@
 //   https://github.com/googleapis/googleapis/blob/master/google/api/http.proto
 
 syntax = "proto3";
-package open_match.v2; // would be nice to match the domain name, alas: https://stackoverflow.com/a/63228588
-option go_package = "open-match.dev/open-match2/pkg/pb/v2";
+package open_match2; // would be nice to match the domain name, alas: https://stackoverflow.com/a/63228588
+option go_package = "github.com/googleforgames/open-match2/pkg/pb";
 option csharp_namespace = "OpenMatch2";
 
 import "messages.proto";

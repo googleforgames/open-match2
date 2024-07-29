@@ -37,7 +37,7 @@ import (
 	"open-match.dev/open-match2/core/internal/statestore/cache"
 	memoryReplicator "open-match.dev/open-match2/core/internal/statestore/memory"
 	redisReplicator "open-match.dev/open-match2/core/internal/statestore/redis"
-	pb "open-match.dev/open-match2/pkg/pb/v2"
+	pb "open-match.dev/open-match2/pkg/pb"
 )
 
 var (

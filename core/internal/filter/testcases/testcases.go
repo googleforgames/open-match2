@@ -21,7 +21,7 @@ import (
 	"time"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
-	pb "open-match.dev/open-match2/pkg/pb/v2"
+	pb "open-match.dev/open-match2/pkg/pb"
 )
 
 // TestCase defines a single filtering test case to run.

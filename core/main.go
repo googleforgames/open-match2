@@ -50,7 +50,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	pb "open-match.dev/open-match2/pkg/pb/v2"
+	pb "open-match.dev/open-match2/pkg/pb"
 
 	"github.com/davecgh/go-spew/spew"
 	"github.com/pkg/errors"

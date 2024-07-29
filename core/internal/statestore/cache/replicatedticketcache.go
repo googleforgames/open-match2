@@ -23,7 +23,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	pb "open-match.dev/open-match2/pkg/pb/v2"
+	pb "open-match.dev/open-match2/pkg/pb"
 
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/viper"

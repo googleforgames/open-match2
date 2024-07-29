@@ -37,7 +37,7 @@ import (
 	"github.com/googleforgames/open-match2/internal/statestore/cache"
 	memoryReplicator "github.com/googleforgames/open-match2/internal/statestore/memory"
 	redisReplicator "github.com/googleforgames/open-match2/internal/statestore/redis"
-	pb "open-match.dev/open-match2/pkg/pb"
+	pb "github.com/googleforgames/open-match2/pkg/pb"
 )
 
 var (

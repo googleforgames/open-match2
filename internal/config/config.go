@@ -38,7 +38,7 @@ import (
 func Read() *viper.Viper {
 	cfg := viper.New()
 
-	// Logging config. See the logging module in core/internal/logging for valid values.
+	// Logging config. See the logging module in core/github.com/googleforgames/open-match2/internal/logging for valid values.
 	cfg.SetDefault("OM_LOGGING_FORMAT", "json")
 	cfg.SetDefault("OM_LOGGING_LEVEL", "info")
 

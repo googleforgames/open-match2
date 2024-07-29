@@ -23,11 +23,11 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	pb "open-match.dev/open-match2/pkg/pb"
+	pb "github.com/googleforgames/open-match2/pkg/pb"
 
+	store "github.com/googleforgames/open-match2/internal/statestore/datatypes"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
-	store "github.com/googleforgames/open-match2/internal/statestore/datatypes"
 )
 
 var (

@@ -1,6 +1,6 @@
-module open-match.dev/open-match2
+module github.com/googleforgames/open-match2
 
-go 1.22.4
+go 1.22.5
 
 require (
 	github.com/cenkalti/backoff/v4 v4.3.0

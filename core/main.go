@@ -56,13 +56,13 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
-	"open-match.dev/core/internal/config"
-	"open-match.dev/core/internal/filter"
-	"open-match.dev/core/internal/logging"
-	"open-match.dev/core/internal/statestore/cache"
-	store "open-match.dev/core/internal/statestore/datatypes"
-	memoryReplicator "open-match.dev/core/internal/statestore/memory"
-	redisReplicator "open-match.dev/core/internal/statestore/redis"
+	"open-match.dev/open-match2/core/internal/config"
+	"open-match.dev/open-match2/core/internal/filter"
+	"open-match.dev/open-match2/core/internal/logging"
+	"open-match.dev/open-match2/core/internal/statestore/cache"
+	store "open-match.dev/open-match2/core/internal/statestore/datatypes"
+	memoryReplicator "open-match.dev/open-match2/core/internal/statestore/memory"
+	redisReplicator "open-match.dev/open-match2/core/internal/statestore/redis"
 )
 
 // Required by protobuf compiler's golang gRPC auto-generated code.

@@ -4,5 +4,7 @@
 Dockerfile
 skaffold.yaml
 cloudbuild.yaml
-README.yaml
+*.yaml
+LICENSE
 deploy/
+docs/

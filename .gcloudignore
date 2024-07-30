@@ -3,7 +3,8 @@
 .gcloudignore
 .golangci.yaml
 cloudbuild.yaml
+skaffold.yaml
 *.md
-json
-bak
-core
+LICENSE
+deploy/
+docs/

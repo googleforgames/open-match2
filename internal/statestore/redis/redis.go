@@ -41,7 +41,7 @@ import (
 	"github.com/gomodule/redigo/redis"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
-	store "github.com/googleforgames/open-match2/internal/statestore/datatypes"
+	store "github.com/googleforgames/open-match2/v2/internal/statestore/datatypes"
 )
 
 var (

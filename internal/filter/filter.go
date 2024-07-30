@@ -19,7 +19,7 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	pb "github.com/googleforgames/open-match2/pkg/pb"
+	pb "github.com/googleforgames/open-match2/v2/pkg/pb"
 )
 
 var (

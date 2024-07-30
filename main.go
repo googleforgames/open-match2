@@ -50,16 +50,16 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	pb "github.com/googleforgames/open-match2/pkg/pb"
+	pb "github.com/googleforgames/open-match2/v2/pkg/pb"
 
-	"github.com/googleforgames/open-match2/internal/filter"
-	"github.com/googleforgames/open-match2/internal/logging"
-	"github.com/googleforgames/open-match2/internal/statestore/cache"
-	store "github.com/googleforgames/open-match2/internal/statestore/datatypes"
-	memoryReplicator "github.com/googleforgames/open-match2/internal/statestore/memory"
-	redisReplicator "github.com/googleforgames/open-match2/internal/statestore/redis"
+	"github.com/googleforgames/open-match2/v2/internal/filter"
+	"github.com/googleforgames/open-match2/v2/internal/logging"
+	"github.com/googleforgames/open-match2/v2/internal/statestore/cache"
+	store "github.com/googleforgames/open-match2/v2/internal/statestore/datatypes"
+	memoryReplicator "github.com/googleforgames/open-match2/v2/internal/statestore/memory"
+	redisReplicator "github.com/googleforgames/open-match2/v2/internal/statestore/redis"
 
-	"github.com/googleforgames/open-match2/internal/config"
+	"github.com/googleforgames/open-match2/v2/internal/config"
 
 	"github.com/davecgh/go-spew/spew"
 	"github.com/pkg/errors"
@@ -660,7 +660,7 @@ func (s *grpcServer) InvokeMatchmakingFunctions(req *pb.MmfRequest, stream pb.Op
 
 	for _, ticket := range activeTickets {
 		for name, _ := range validPools {
-			// All the implementation details of filtering are in github.com/googleforgames/open-match2/internal/filter/filter.go
+			// All the implementation details of filtering are in github.com/googleforgames/open-match2/v2/internal/filter/filter.go
 			if filter.In(req.GetProfile().GetPools()[name], ticket.(*pb.Ticket)) {
 				ticketSize := proto.Size(ticket.(*pb.Ticket))
 				// Check if this ticket will put us over the max pb size for this chunk

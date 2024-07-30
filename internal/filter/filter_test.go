@@ -19,8 +19,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/timestamppb"
-	"github.com/googleforgames/open-match2/internal/filter/testcases"
-	pb "github.com/googleforgames/open-match2/pkg/pb"
+	"github.com/googleforgames/open-match2/v2/internal/filter/testcases"
+	pb "github.com/googleforgames/open-match2/v2/pkg/pb"
 )
 
 // TestMeetsCriteria validates that tickets are correctly included/excluded

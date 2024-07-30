@@ -13,7 +13,7 @@ import (
 	"io"
 	"net/http"
 
-	extPb "github.com/googleforgames/open-match2/pkg/pb"
+	extPb "github.com/googleforgames/open-match2/v2/pkg/pb"
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"github.com/grpc-ecosystem/grpc-gateway/v2/utilities"
 	"google.golang.org/grpc"

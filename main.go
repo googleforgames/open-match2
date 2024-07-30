@@ -721,7 +721,7 @@ func (s *grpcServer) InvokeMatchmakingFunctions(req *pb.MmfRequest, stream pb.Op
 	// Channel on which MMFs return their matches.
 	matchChan := make(chan *pb.Match)
 	go func() {
-		// Local logger with a flag to indicate logs are from this goroutine.
+		// Local logger with a field to indicate logs are from this goroutine.
 		logger := logger.WithFields(logrus.Fields{"stage": "fan-in"})
 		logger.Trace("MMF results fan-in goroutine active")
 

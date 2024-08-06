@@ -56,7 +56,7 @@ service OpenMatchService {
   // in each to fill the pools with eligible tickets. Once all pools in the profile are 
   // filled with all eligible tickets, a copy of the profile is sent to each matchmaking
   // function endpoint specified in the request. MMF calls are defined by a separate gRPC
-  // service defined in proto/v2/mmf.proto, please reference it for details as to the input
+  // service defined in proto/mmf.proto, please reference it for details as to the input
   // and output of matchmaking functions.
   // All matches returned from all MMFs before the context deadline are then sent back 
   // to OM's InvokeMatchmakingFunctions handler, which does the following:

@@ -9,8 +9,7 @@ The Open Match artifact registry maintains a pre-built otel collector image with
 To build the OpenTelemetry Collector sidecar image:
 1.  Make sure your `gcloud` installation is configured to use the Open Match development project
 1.  Make sure your `glcoud` installation has the `artifacts/location` config set to the location for the Open Match artifact registry
-1.  (optional) If you want to update the configuration file, update the permanent URL on the second line of the Dockerfile with the latest from the [official Google golang-samples repo](https://github.com/GoogleCloudPlatform/golang-samples/blob/main/run/custom-metrics/collector/collector-config.yaml). Probably unnecessary unless something is broken with metrics/tracing.
-1. run the following command from this directory:
+1.  Run the following command from this directory:
 
  `gcloud builds submit . --tag $(gcloud config get artifacts/location)-docker.pkg.dev/$(gcloud config get project)/open-match/otel-collector-sidecar`
 

@@ -11,5 +11,5 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-FROM otel/opentelemetry-collector-contrib
-ADD https://github.com/GoogleCloudPlatform/golang-samples/blob/4807209511f93f4390eef72e047ffd3daa969537/run/custom-metrics/collector/collector-config.yaml /etc/otelcol-contrib/config.yaml
+FROM otel/opentelemetry-collector-contrib:0.101.0
+ADD config.yaml /etc/otelcol-contrib/config.yaml

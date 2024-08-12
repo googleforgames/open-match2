@@ -32,16 +32,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/signal"
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
 	"github.com/gomodule/redigo/redis"
+	store "github.com/googleforgames/open-match2/v2/internal/statestore/datatypes"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
-	store "github.com/googleforgames/open-match2/v2/internal/statestore/datatypes"
 )
 
 var (
@@ -71,6 +74,11 @@ type redisReplicator struct {
 //
 //nolint:wrapcheck,cyclop
 func New(cfg *viper.Viper) (*redisReplicator, error) {
+	// Exit on signal
+	ctx, cancel := context.WithCancel(context.Background())
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, syscall.SIGTERM, syscall.SIGINT)
+
 	var err error
 
 	// Request all updates that are newer than the configured
@@ -159,28 +167,36 @@ func New(cfg *viper.Viper) (*redisReplicator, error) {
 						// Local closure var
 						var err error
 
-						// 'conn' here refers to the variable in the enclosing
-						// redis.Pool{Dial: func() (redis.Conn, error)}
-						// scope, which is returned when the dial was successful.
-						// 'err' is the local variable, which
-						// backoff.RetryNotify() evaluates to determine if it
-						// needs to retry this operation.
-						rConnLogger.Debug("dialing Redis read replica")
-						conn, err = redis.Dial("tcp",
-							readRedisUrl,
-							redis.DialUsername(cfg.GetString("OM_REDIS_READ_USER")),
-							redis.DialPassword(cfg.GetString("OM_REDIS_READ_PASSWORD")),
-							redis.DialConnectTimeout(cfg.GetDuration("OM_REDIS_POOL_IDLE_TIMEOUT")),
-							redis.DialReadTimeout(cfg.GetDuration("OM_REDIS_POOL_IDLE_TIMEOUT")),
-						)
-						if err != nil { // Check for error on dial
-							rConnLogger.Error("failure dialing Redis read replica")
-						}
+						select {
+						// Check to see if an SIGTERM or SIGINT were received
+						// before executing the dial - if they were, cancel the
+						// context to end the backoff retries.
+						case <-signalChan:
+							cancel()
+						default:
+							// 'conn' here refers to the variable in the enclosing
+							// redis.Pool{Dial: func() (redis.Conn, error)}
+							// scope, which is returned when the dial was successful.
+							// 'err' is the local variable, which
+							// backoff.RetryNotify() evaluates to determine if it
+							// needs to retry this operation.
+							rConnLogger.Debug("dialing Redis read replica")
+							conn, err = redis.Dial("tcp",
+								readRedisUrl,
+								redis.DialUsername(cfg.GetString("OM_REDIS_READ_USER")),
+								redis.DialPassword(cfg.GetString("OM_REDIS_READ_PASSWORD")),
+								redis.DialConnectTimeout(cfg.GetDuration("OM_REDIS_POOL_IDLE_TIMEOUT")),
+								redis.DialReadTimeout(cfg.GetDuration("OM_REDIS_POOL_IDLE_TIMEOUT")),
+							)
+							if err != nil { // Check for error on dial
+								rConnLogger.Error("failure dialing Redis read replica")
+							}
 
+						}
 						return err
 					},
-					backoff.NewExponentialBackOff(backoff.WithMaxElapsedTime(
-						cfg.GetDuration("OM_REDIS_DIAL_MAX_BACKOFF_TIMEOUT"))),
+					backoff.WithContext(backoff.NewExponentialBackOff(backoff.WithMaxElapsedTime(
+						cfg.GetDuration("OM_REDIS_DIAL_MAX_BACKOFF_TIMEOUT"))), ctx),
 					func(err error, bo time.Duration) { // Function that fires when the operation returns an error
 						rConnLogger.WithFields(logrus.Fields{"error": err}).Debugf(
 							"Error attempting to connect to Redis read replica. Retrying in %s", bo)
@@ -211,31 +227,39 @@ func New(cfg *viper.Viper) (*redisReplicator, error) {
 				err := backoff.RetryNotify(
 					func() error { // Operation that the backoff module will retry
 
-						// Local closure var
-						var err error
+						select {
+						// Check to see if an SIGTERM or SIGINT were received
+						// before executing the dial - if they were, cancel the
+						// context to end the backoff retries.
+						case <-signalChan:
+							cancel()
+						default:
+							// Local closure var
+							var err error
 
-						// 'conn' here refers to the variable in the enclosing
-						// redis.Pool{Dial: func() (redis.Conn, error)}
-						// scope, which is returned when the dial was successful.
-						// 'err' is the local variable, which
-						// backoff.RetryNotify() evaluates to determine if it
-						// needs to retry this operation.
-						wConnLogger.Debug("dialing Redis write instance")
-						conn, err = redis.Dial("tcp",
-							writeRedisUrl,
-							redis.DialUsername(cfg.GetString("OM_REDIS_WRITE_USER")),
-							redis.DialPassword(cfg.GetString("OM_REDIS_WRITE_PASSWORD")),
-							redis.DialConnectTimeout(cfg.GetDuration("OM_REDIS_POOL_IDLE_TIMEOUT")),
-							redis.DialReadTimeout(cfg.GetDuration("OM_REDIS_POOL_IDLE_TIMEOUT")),
-						)
-						if err != nil { // Check for error on dial
-							wConnLogger.Error("failure dialing Redis write instance")
+							// 'conn' here refers to the variable in the enclosing
+							// redis.Pool{Dial: func() (redis.Conn, error)}
+							// scope, which is returned when the dial was successful.
+							// 'err' is the local variable, which
+							// backoff.RetryNotify() evaluates to determine if it
+							// needs to retry this operation.
+							wConnLogger.Debug("dialing Redis write instance")
+							conn, err = redis.Dial("tcp",
+								writeRedisUrl,
+								redis.DialUsername(cfg.GetString("OM_REDIS_WRITE_USER")),
+								redis.DialPassword(cfg.GetString("OM_REDIS_WRITE_PASSWORD")),
+								redis.DialConnectTimeout(cfg.GetDuration("OM_REDIS_POOL_IDLE_TIMEOUT")),
+								redis.DialReadTimeout(cfg.GetDuration("OM_REDIS_POOL_IDLE_TIMEOUT")),
+							)
+							if err != nil { // Check for error on dial
+								wConnLogger.Error("failure dialing Redis write instance")
+							}
+
 						}
-
 						return err
 					},
-					backoff.NewExponentialBackOff(backoff.WithMaxElapsedTime(
-						cfg.GetDuration("OM_REDIS_DIAL_MAX_BACKOFF_TIMEOUT"))),
+					backoff.WithContext(backoff.NewExponentialBackOff(backoff.WithMaxElapsedTime(
+						cfg.GetDuration("OM_REDIS_DIAL_MAX_BACKOFF_TIMEOUT"))), ctx),
 					func(err error, bo time.Duration) { // Function that fires when the operation returns an error
 						wConnLogger.WithFields(logrus.Fields{"error": err}).Debugf(
 							"Error attempting to connect to Redis write instance. Retrying in %s", bo)
@@ -272,6 +296,12 @@ func New(cfg *viper.Viper) (*redisReplicator, error) {
 			"error": err,
 		}).Debug("write redis connection error")
 		return nil, err
+	}
+
+	// Check if the context has been cancelled by SIGINT or SIGTERM.
+	if ctx.Err() != nil {
+		rConnLogger.Fatal("cancellation requested")
+		return nil, ctx.Err()
 	}
 
 	return rr, err

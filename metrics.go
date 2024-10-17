@@ -114,7 +114,7 @@ func initializeOtel() (*otelmetrics.Meter, func(context.Context) error) {
 // initializeOtelWithLocalProm runs  a default OpenTelemetry Reader and
 // implements prometheus.Collector, allowing it to be used as both a Reader and
 // Collector. http://localhost:2223/metrics . For use with local development.
-func initializeOtelWithLocalProm() *otelmetrics.Meter { //nolint:unused
+func initializeOtelWithLocalProm() (*otelmetrics.Meter, func(context.Context) error) { //nolint:unused
 	// Get resource attributes
 	res, err := resource.New(
 		context.Background(),
@@ -159,7 +159,7 @@ func initializeOtelWithLocalProm() *otelmetrics.Meter { //nolint:unused
 	provider := metric.NewMeterProvider(metric.WithResource(res), metric.WithReader(exporter))
 	meter := provider.Meter("open_match.core")
 
-	return &meter
+	return &meter, provider.Shutdown
 }
 
 //nolint:cyclop // Cyclop linter sees each metric initialization as +1 cyclomatic complexity for some reason.

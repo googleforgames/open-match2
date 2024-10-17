@@ -117,7 +117,8 @@ func main() {
 	}
 
 	// Configure metrics
-	meter, otelShutdownFunc = initializeOtel()
+	//meter, otelShutdownFunc = initializeOtel()
+	meter, otelShutdownFunc = initializeOtelWithLocalProm()
 	defer otelShutdownFunc(ctx) //nolint:errcheck
 	registerMetrics(meter)
 	cache.RegisterMetrics(meter)
@@ -637,7 +638,6 @@ func (s *grpcServer) InvokeMatchmakingFunctions(req *pb.MmfRequest, stream pb.Op
 	}
 
 	// Track the number of pools in requested profiles
-	logger.Tracef("Tickets filtered into %v pools", len(validPools))
 	otelPoolsPerProfile.Record(context.Background(), int64(len(validPools)),
 		metric.WithAttributes(attribute.String("profile.name", profileName)),
 	)
@@ -691,6 +691,8 @@ func (s *grpcServer) InvokeMatchmakingFunctions(req *pb.MmfRequest, stream pb.Op
 	// MMF if it somehow only got part of the chunked request.
 	chunkedRequest := make([]*pb.ChunkedMmfRunRequest, len(chunkedPools))
 	for chunkIndex, chunk := range chunkedPools {
+		logger.Debugf("processing chunk %v ", chunkIndex)
+
 		// Fill this request 'chunk' with the chunked pools we built above
 		pools := make(map[string]*pb.Pool)
 		profile := &pb.Profile{
@@ -699,6 +701,7 @@ func (s *grpcServer) InvokeMatchmakingFunctions(req *pb.MmfRequest, stream pb.Op
 			Extensions: req.GetProfile().GetExtensions(),
 		}
 		for name, participantRoster := range chunk {
+			logger.Debugf("making chunk containing %v tickets", len(participantRoster))
 			profile.GetPools()[name] = &pb.Pool{
 				Participants: &pb.Roster{
 					Name:    name + "_roster",
@@ -742,7 +745,7 @@ func (s *grpcServer) InvokeMatchmakingFunctions(req *pb.MmfRequest, stream pb.Op
 				// Send the match back to the caller.
 				err := stream.Send(&pb.StreamedMmfResponse{Match: match})
 				if err != nil {
-					logger.Error(err)
+					logger.Errorf("Unable to stream match result back to matchmaker: %v", err)
 				}
 			}
 		}
@@ -764,7 +767,10 @@ func (s *grpcServer) InvokeMatchmakingFunctions(req *pb.MmfRequest, stream pb.Op
 	)
 
 	// Auth using IAM when on Google Cloud
+	// Maintain a dictionary of tokens and tokenSources by MMF so we aren't
+	// recreating them every time.
 	tokenSources := map[string]oauth2.TokenSource{}
+	tokens := map[string]*oauth2.Token{}
 
 	// Invoke each requested MMF, and put the matches they stream back into the match channel.
 	// TODO: Technically this would be better as an ErrorGroup but this already works.
@@ -824,16 +830,78 @@ func (s *grpcServer) InvokeMatchmakingFunctions(req *pb.MmfRequest, stream pb.Op
 			ctx, cancel := context.WithTimeout(context.Background(), mmfTimeout)
 			defer cancel()
 
-			// TODO: Potential future optimization: cache
-			// connections/clients using a pool and re-use
+			// TODO: Potential future optimization: cache connections/clients using a pool and re-use
 			var conn *grpc.ClientConn
+			// Default to unauthenticated grpc
 			creds := insecure.NewCredentials()
+
+			// If MMF server is running with TLS (https), we must authenticate
+			// Note: TLS is transparently added to the MMF server when running on Cloud Run,
+			//       see https://cloud.google.com/run/docs/container-contract#tls
 			if mmfUrl.Scheme == "https" {
-				// MMF server is running with TLS.
-				// Note: TLS is transparently added to the MMF server when running on Cloud Run,
-				//       see https://cloud.google.com/run/docs/container-contract#tls
 				creds = credentials.NewTLS(tlsConfig)
+				audience := mmf.GetHost()
+				httpsLogger := logger.WithFields(logrus.Fields{
+					"audience": audience,
+				})
+				httpsLogger.Infof("HTTPS mmf url detected. Attempting to set up secure grpc credentials.")
+
+				// Fetch Google Cloud IAM auth token; have to make a new one if
+				// it doesn't exists or is invalid
+				var token *oauth2.Token
+				var exists bool
+				if token, exists = tokens[audience]; !exists || !token.Valid() {
+
+					// Check for existing tokenSource
+					if _, exists = tokenSources[audience]; !exists {
+						// Create a TokenSource if none exists.
+						tokenSources[audience], err = idtoken.NewTokenSource(ctx, audience)
+						if err != nil {
+							err = status.Error(codes.Internal, fmt.Errorf(
+								"Failed to get a source for ID tokens to contact gRPC MMF at %v: %w",
+								mmfUrl.Host, err).Error())
+							httpsLogger.Error(err)
+							otelMmfFailures.Add(ctx, 1, metric.WithAttributes(
+								attribute.String("mmf.name", mmf.GetName()),
+								attribute.String("profile.name", profileName),
+							))
+							return fmt.Errorf("%w", err)
+						}
+						httpsLogger.Trace("successfully initialized new token source")
+					}
+
+					// Get new token from the tokenSource, store it in the map
+					// for later use
+					tokens[audience], err = tokenSources[audience].Token()
+					if err != nil {
+						err = status.Error(codes.Internal, fmt.Errorf(
+							"Failed to get ID token to contact gRPC MMF at %v: %w",
+							mmfUrl.Host, err).Error())
+						httpsLogger.Error(err)
+						otelMmfFailures.Add(ctx, 1, metric.WithAttributes(
+							attribute.String("mmf.name", mmf.GetName()),
+							attribute.String("profile.name", profileName),
+						))
+						return fmt.Errorf("%w", err)
+					}
+
+					// New token successfully minted; use it for this call
+					token = tokens[audience]
+
+					httpsLogger.WithFields(logrus.Fields{
+						"trunc_access_token": fmt.Sprintf("%v...", token.AccessToken[0:8]),
+					}).Trace("successfully retrieved new access token")
+				} else {
+					httpsLogger.WithFields(logrus.Fields{
+						"trunc_access_token": fmt.Sprintf("%v...", token.AccessToken[0:8]),
+					}).Trace("reusing existing valid access token")
+				}
+
+				// Add Google Cloud IAM auth token to the context.
+				ctx = grpcMetadata.AppendToOutgoingContext(ctx,
+					"authorization", "Bearer "+token.AccessToken)
 			}
+
 			opts = append(opts,
 				grpc.WithTransportCredentials(creds),
 				grpc.WithAuthority(mmfUrl.Host),
@@ -851,42 +919,6 @@ func (s *grpcServer) InvokeMatchmakingFunctions(req *pb.MmfRequest, stream pb.Op
 				return fmt.Errorf("%w", err)
 			}
 			defer conn.Close()
-
-			// Fetch Google Cloud IAM auth token
-			var ok bool
-			// Maintain a dictionary of tokenSources by MMF so we aren't recreating them every time.
-			if _, ok = tokenSources[mmf.GetHost()]; !ok {
-				// Create a TokenSource if none exists.
-				tokenSources[mmf.GetHost()], err = idtoken.NewTokenSource(ctx, mmf.GetHost())
-				if err != nil {
-					err = status.Error(codes.Internal, fmt.Errorf(
-						"Failed to get a source for ID tokens to contact gRPC MMF at %v: %w",
-						mmfUrl.Host, err).Error())
-					logger.Error(err)
-					otelMmfFailures.Add(ctx, 1, metric.WithAttributes(
-						attribute.String("mmf.name", mmf.GetName()),
-						attribute.String("profile.name", profileName),
-					))
-					return fmt.Errorf("%w", err)
-				}
-			}
-			// Get the token from the tokenSource.
-			token, err := tokenSources[mmf.GetHost()].Token()
-			if err != nil {
-				err = status.Error(codes.Internal, fmt.Errorf(
-					"Failed to get ID token to contact gRPC MMF at %v: %w",
-					mmfUrl.Host, err).Error())
-				logger.Error(err)
-				otelMmfFailures.Add(ctx, 1, metric.WithAttributes(
-					attribute.String("mmf.name", mmf.GetName()),
-					attribute.String("profile.name", profileName),
-				))
-				return fmt.Errorf("%w", err)
-			}
-
-			// Add Google Cloud IAM auth token to the context.
-			ctx = grpcMetadata.AppendToOutgoingContext(ctx,
-				"authorization", "Bearer "+token.AccessToken)
 
 			// Get MMF client. May be possible to re-use, but would
 			// require some validation of assumptions; for now we're
@@ -923,7 +955,7 @@ func (s *grpcServer) InvokeMatchmakingFunctions(req *pb.MmfRequest, stream pb.Op
 			for index, chunk := range chunkedRequest {
 				err = mmfStream.Send(chunk)
 				if err != nil {
-					logger.Error(err)
+					logger.Errorf("Failed to send MmfRequest chunk to MMF: %v", err)
 				}
 				logger.Tracef("MMF request chunk %02d/%02d: %0.2fmb", index+1, len(chunkedRequest), float64(proto.Size(chunk))/float64(1024*1024))
 			}
@@ -1085,7 +1117,7 @@ func (s *grpcServer) InvokeMatchmakingFunctions(req *pb.MmfRequest, stream pb.Op
 					attribute.String("mmf.name", mmf.GetName()),
 					attribute.String("profile.name", profileName),
 				))
-				logger.Error(err)
+				logger.Errorf("Internal MMF error:%v", err)
 			}
 
 			// All done

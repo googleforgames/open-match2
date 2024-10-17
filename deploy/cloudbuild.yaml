@@ -1,0 +1,81 @@
+# To use this cloudbuild.yaml from it's directory:
+#   gcloud builds submit --async --no-source \
+#     --substitutions=COMMIT_SHA=<CONTAINER_IMAGE_TAG_TO_DEPLOY>
+#
+# Depending on how your project is set up, you may need to add the required Cloud Run role
+# (https://cloud.google.com/run/docs/reference/iam/roles) to the cloud build
+# service account using a gcloud command like this:
+#   gcloud projects add-iam-policy-binding $(gcloud config get project) \ 
+#     --member=serviceAccount:$(gcloud projects list --filter=$(gcloud config get project) --format="value(PROJECT_NUMBER)")-compute@developer.gserviceaccount.com \
+#     --role=roles/run.developer
+# You probably also need to allow Cloud Build to deploy using this application's custom Cloud Run _SERVICE_ACCOUNT:
+#   gcloud iam service-accounts add-iam-policy-binding \
+#     <_SERVICE_ACCOUNT>@$(gcloud config get project).iam.gserviceaccount.com \
+#     --role=roles/iam.serviceAccountUser \
+#     --member=serviceAccount:$(gcloud projects list --filter=$(gcloud config get project) --format="value(PROJECT_NUMBER)")-compute@developer.gserviceaccount.com
+
+substitutions:
+  # Cloud deploy vars
+  _ARTIFACT_REGISTRY_URI: asia-northeast1-docker.pkg.dev/open-match-dev/open-match
+  _JOB_NAME: om-core 
+  _SERVICE_ACCOUNT: om-core-identity 
+  _RUN_REGION: asia-northeast1
+
+  # Application environment vars
+  _OM_LOGGING_LEVEL: info 
+  _OM_REDIS_WRITE_HOST: 10.67.230.244 
+  _OM_REDIS_READ_HOST: 10.67.230.245 
+steps:
+  # Deploy existing container image to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: "Deploy:ingress vpc, all egress vpc"
+    waitFor: ["-"]
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      # service config
+      - ${_JOB_NAME}
+      - --no-allow-unauthenticated
+      - --concurrency
+      - "1000"
+      - --service-account
+      - ${_SERVICE_ACCOUNT}
+      - --region
+      - ${_RUN_REGION}
+
+      # Network config
+      - --network
+      - default
+      - --subnet
+      - default
+      - --vpc-egress
+      - all-traffic 
+
+      # ingress config
+      - --ingress
+      - internal
+
+      # sidecar 'otel-collector' config
+      - --container
+      - "opentelemetry-collector"
+      - --image
+      - asia-northeast1-docker.pkg.dev/open-match-dev/open-match/otel-collector-sidecar
+
+      # 'core' config
+      - --container
+      - "core"
+      - --image
+      - '${_ARTIFACT_REGISTRY_URI}/${_JOB_NAME}:${COMMIT_SHA}'
+      - --port
+      - "8080"
+      - --memory
+      - 1024Mi
+
+      # env vars for 'core'
+      - --update-env-vars
+      - "OM_LOGGING_LEVEL=${_OM_LOGGING_LEVEL}"
+      - --update-env-vars
+      - "OM_REDIS_WRITE_HOST=${_OM_REDIS_WRITE_HOST}"
+      - --update-env-vars
+      - "OM_REDIS_READ_HOST=${_OM_REDIS_READ_HOST}"

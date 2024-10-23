@@ -23,8 +23,9 @@ The following represent best practices but not required when doing a new release
 * After verifying that the build works with the latest dependencies, commit any changes to `go.mod` to the repo. 
 
 ## Deploy
-The `deploy` directory contains a sample `service.yaml` file you can edit to deploy an `om-core` service to Cloud Run in Google Cloud. 
-This file should be populated with the following:
+The `deploy` directory contains sample `service.yaml` and `cloudbuild.yaml` files, either of which you can edit to deploy an `om-core` service to Cloud Run in Google Cloud.  Typically the `service.yaml` is easier to adapt to manually deploying via command line, and `cloudbuild.yaml` is easier to adapt to a continuous build system, although feel free to use them as you see fit.
+
+You should populate the following:
 * Your [VPC network](https://cloud.google.com/vpc/docs/overview).  Unless your company has turned on the `constraints/compute.skipDefaultNetworkCreation` org policy, your Google Cloud project will have a VPC created already, named `default`.
 * Your Service Account created for `om-core`. The `deploy/cloudrun-sa.iam` file lists all the roles the service account will need. 
 * Your Redis instance IP address(es, OM supports configuring reads and writes to go to a master/replica respectively if you wish) that can be reached from Cloud Run. We test against Cloud Memorystore for Redis using the configuration detailed in [this guide](https://cloud.google.com/memorystore/docs/redis/connect-redis-instance-cloud-run).
@@ -33,6 +34,8 @@ With the `service.yaml` file populated with everything you've configured, you ca
 ```
 gcloud run services replace service.yaml
 ```
+If you instead intend to use the `cloudbuild.yaml` file populated with everything you've configured, you can deploy the service with a command like the one listed in the comment at the top of the file (requires you to have enabled Cloud Build and have appropriate service account permissions):
+
 You may need to adjust the scaling configuration and amount of memory `om-core` is allowed to use depending on your matchmaker.
 
 `core` is just a gRPC/HTTP golang application in a container image and can be deployed in most environments (local Docker/Minikube/Kubernetes/kNative) with a little effort. 

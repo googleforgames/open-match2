@@ -42,6 +42,9 @@ func Read() *viper.Viper {
 	cfg.SetDefault("OM_LOGGING_FORMAT", "json")
 	cfg.SetDefault("OM_LOGGING_LEVEL", "info")
 
+	// OTel metrics config.
+	cfg.SetDefault("OM_OTEL_SIDECAR", true)
+
 	// False: wait until all tickets in a match have had their deactivation
 	// saved to state storage before returning the match to the matchmaker.
 	// Slower results but (theoretically) fewer ticket collisions among

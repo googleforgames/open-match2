@@ -117,8 +117,11 @@ func main() {
 	}
 
 	// Configure metrics
-	//meter, otelShutdownFunc = initializeOtel()
-	meter, otelShutdownFunc = initializeOtelWithLocalProm()
+	if cfg.GetBool("OM_OTEL_SIDECAR") {
+		meter, otelShutdownFunc = initializeOtel()
+	} else {
+		meter, otelShutdownFunc = initializeOtelWithLocalProm()
+	}
 	defer otelShutdownFunc(ctx) //nolint:errcheck
 	registerMetrics(meter)
 	cache.RegisterMetrics(meter)

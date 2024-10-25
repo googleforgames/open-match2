@@ -60,7 +60,7 @@ If the creation is successful you should get a response like this:
 If you want to just run the `om-core` application locally, you can `go run .` in the root directory, and it will start up. However, by default, most of the configuration variables are set to work out-of-the-box in Cloud Run, so when running locally you'll probably want to set (at least) the following environment variables:
 
 * `OM_OTEL_SIDECAR=false` By default, the application tries to export metrics to a local OpenTelemetry sidecar, and running without one will cause an error. Use `false` to instead run a local metrics exporter that doesn't rely on an OpenTelemetry Collector.
-* `OM_STATE_STORAGE_TYPE=memory` By default, the application tries to store state in Redis (and you should always use that setting and only that setting in production). Use `memory` to use only a volitile local copy of state in RAM for testing, and ignores the values set in all the `*REDIS*` config variables.
+* `OM_STATE_STORAGE_TYPE=memory` By default, the application tries to store state in Redis (and you should always use that setting in production).  `memory` instead uses only a volitile local copy of state in RAM, and ignores the values set in all the `*REDIS*` config variables. Only use this for testing.
 * `OM_LOGGING_FORMAT=text` By default log lines are written in JSON, setting this to `text` is a bit more human-readable.
 
 Additionally you may also want to adjust these:

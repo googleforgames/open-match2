@@ -37,8 +37,13 @@ func ConfigureLogging(cfg *viper.Viper) {
 	}
 	logrus.SetLevel(level)
 	if level >= logrus.TraceLevel {
-		logrus.SetReportCaller(true)
 		logrus.Warn("Trace logging level configured. Not recommended for production!")
+	}
+	if level >= logrus.DebugLevel {
+		// Dump out the config at start-up if log level is set to Debug or higher.
+		for key, value := range cfg.AllSettings() {
+			logrus.Debugf(" current configuration: %40v:%v", key, value)
+		}
 	}
 }
 

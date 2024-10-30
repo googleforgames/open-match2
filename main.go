@@ -891,13 +891,27 @@ func (s *grpcServer) InvokeMatchmakingFunctions(req *pb.MmfRequest, stream pb.Op
 					// New token successfully minted; use it for this call
 					token = tokens[audience]
 
-					httpsLogger.WithFields(logrus.Fields{
-						"trunc_access_token": fmt.Sprintf("%v...", token.AccessToken[0:8]),
-					}).Trace("successfully retrieved new access token")
+					// Make a truncated version of the token for trace logging.
+					if logrus.IsLevelEnabled(logrus.TraceLevel) {
+						truncToken := token.AccessToken
+						if len(truncToken) >= 8 {
+							truncToken = truncToken[0:7]
+						}
+						ttField := logrus.Fields{"trunc_access_token": fmt.Sprintf("%v...", truncToken)}
+
+						httpsLogger.WithFields(ttField).Trace("successfully retrieved new access token")
+					}
 				} else {
-					httpsLogger.WithFields(logrus.Fields{
-						"trunc_access_token": fmt.Sprintf("%v...", token.AccessToken[0:8]),
-					}).Trace("reusing existing valid access token")
+					// Make a truncated version of the token for trace logging.
+					if logrus.IsLevelEnabled(logrus.TraceLevel) {
+						truncToken := token.AccessToken
+						if len(truncToken) >= 8 {
+							truncToken = truncToken[0:7]
+						}
+						ttField := logrus.Fields{"trunc_access_token": fmt.Sprintf("%v...", truncToken)}
+
+						httpsLogger.WithFields(ttField).Trace("reusing existing valid access token")
+					}
 				}
 
 				// Add Google Cloud IAM auth token to the context.

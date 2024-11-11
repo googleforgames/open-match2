@@ -54,7 +54,7 @@ func Read() *viper.Viper {
 	// successfully returned. Fastest results but possibly more ticket
 	// collisions if you have lots of mmfs running concurrently.
 	// TODO: validate this has the expected effect when using redis
-	cfg.SetDefault("OM_MATCH_TICKET_DEACTIVATION_WAIT", false)
+	cfg.SetDefault("OM_MATCH_TICKET_DEACTIVATION_WAIT", true)
 
 	// Maximum number of updates allowed in activate/deactivate/assignment gRPC requests.
 	// Must be a positive value that fits in a signed int32.

@@ -61,7 +61,7 @@ func Read() *viper.Viper {
 	cfg.SetDefault("OM_MAX_STATE_UPDATES_PER_CALL", 500)
 
 	// How long OM-Core will wait for your MMF to complete before cancelling its context.
-	cfg.SetDefault("OM_MMF_TIMEOUT_SECS", 500)
+	cfg.SetDefault("OM_MMF_TIMEOUT_SECS", 600)
 
 	// Where the OM state is stored.
 	// 'redis' (default): write to host in OM_REDIS_WRITE* config vars, and

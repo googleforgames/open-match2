@@ -595,7 +595,7 @@ func (s *grpcServer) InvokeMatchmakingFunctions(req *pb.MmfRequest, stream pb.Op
 	ctx, cancel := context.WithCancelCause(context.WithoutCancel(context.Background())) // ignore cancellation from parent context
 	ctx, _ = context.WithTimeoutCause(ctx, mmfTimeout, MMFTimeoutError)
 	defer func() {
-		logger.Warnf("MMFs complete, sending context cancellation after %04d ms", time.Since(startTime).Milliseconds())
+		logger.Debugf("MMFs complete, sending context cancellation after %04d ms", time.Since(startTime).Milliseconds())
 		cancel(MMFsComplete)
 	}()
 
@@ -1087,8 +1087,8 @@ func (s *grpcServer) InvokeMatchmakingFunctions(req *pb.MmfRequest, stream pb.Op
 						}
 					}
 
-					// Option 1: Wait for deactivation to complete BEFORE
-					// returning the match.
+					// Option 1 (default): Wait for deactivation to complete
+					// BEFORE returning the match.
 					if cfg.GetBool("OM_MATCH_TICKET_DEACTIVATION_WAIT") {
 						deactivationCheck(ticketIdsToDeactivate[len(ticketIdsToDeactivate)-1])
 						logger.Trace("ticket deactivations complete, returning match")
@@ -1111,8 +1111,10 @@ func (s *grpcServer) InvokeMatchmakingFunctions(req *pb.MmfRequest, stream pb.Op
 					}
 					matchChan <- res
 
-					// Option 2: Match already returned; clean up
-					// goroutine when deactivation is complete.
+					// Option 2 (dangerous!): Match already returned; clean up
+					// goroutine when deactivation is complete. Only use this
+					// setting if you throughly understand this code, and the
+					// state storage replication code!
 					if !cfg.GetBool("OM_MATCH_TICKET_DEACTIVATION_WAIT") {
 						deactivationCheck(ticketIdsToDeactivate[len(ticketIdsToDeactivate)-1])
 						logger.Trace("ticket deactivations complete for previously returned match")

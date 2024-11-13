@@ -77,6 +77,8 @@ var (
 	NoTicketIdsErr      = errors.New("No Ticket IDs in update request")
 	NoValidTicketIdsErr = errors.New("No Valid Ticket IDs in update request")
 	TooManyUpdatesErr   = errors.New("Too many ticket state updates requested in a single call")
+	MMFTimeoutError     = errors.New("MMF deadline in om-core (specified in OM_MMF_TIMEOUT_SECS config var) exceeded")
+	MMFsComplete        = errors.New("All MMF streams monitored by om-core have completed (io.EOF)")
 
 	logger = logrus.WithFields(logrus.Fields{
 		"app":       "open_match",
@@ -582,6 +584,21 @@ func updateTicketsActiveState(parentCtx context.Context, logger *logrus.Entry, t
 //nolint:gocognit,cyclop,gocyclo,maintidx
 func (s *grpcServer) InvokeMatchmakingFunctions(req *pb.MmfRequest, stream pb.OpenMatchService_InvokeMatchmakingFunctionsServer) error {
 
+	startTime := time.Now()
+
+	// Set a timeout for this API call, but ignore context cancellations from
+	// the  background context. It is fully intended that MMFs can run longer
+	// than the matchmaker is willing to wait, so we want them not to get
+	// cancelled when the calling matchmaker cancels its context. However, best
+	// practices dictate that we define /some/ timeout (default: 10 mins)
+	mmfTimeout := time.Duration(cfg.GetInt("OM_MMF_TIMEOUT_SECS")) * time.Second
+	ctx, cancel := context.WithCancelCause(context.WithoutCancel(context.Background())) // ignore cancellation from parent context
+	ctx, _ = context.WithTimeoutCause(ctx, mmfTimeout, MMFTimeoutError)
+	defer func() {
+		logger.Warnf("MMFs complete, sending context cancellation after %04d ms", time.Since(startTime).Milliseconds())
+		cancel(MMFsComplete)
+	}()
+
 	// input validation
 	if req.GetProfile() == nil {
 		return fmt.Errorf("%w", status.Error(codes.InvalidArgument, "profile is required"))
@@ -726,32 +743,31 @@ func (s *grpcServer) InvokeMatchmakingFunctions(req *pb.MmfRequest, stream pb.Op
 	//
 	// Channel on which MMFs return their matches.
 	matchChan := make(chan *pb.Match)
+	var fanwg sync.WaitGroup
 	go func() {
+		fanwg.Add(1)
 		// Local logger with a field to indicate logs are from this goroutine.
 		logger := logger.WithFields(logrus.Fields{"stage": "fan-in"})
 		logger.Trace("MMF results fan-in goroutine active")
+		for match := range matchChan {
 
-		for {
-			logger.Trace("MMF results fan-in waiting")
+			logger.WithFields(logrus.Fields{
+				"match_id": match.GetId(),
+			}).Trace("streaming back match to matchmaker")
 
-			select {
-			case match, ok := <-matchChan: // goroutine waits here for next match
-				if !ok { // The channel notified us that it is closed.
-					logger.Trace("ALL MMFS COMPLETE: exiting MMF results fan-in goroutine")
-					return
-				}
-
-				logger.WithFields(logrus.Fields{
-					"match_id": match.GetId(),
-				}).Trace("streaming back match to matchmaker")
-
-				// Send the match back to the caller.
-				err := stream.Send(&pb.StreamedMmfResponse{Match: match})
-				if err != nil {
-					logger.Errorf("Unable to stream match result back to matchmaker: %v", err)
-				}
+			// Send the match back to the caller.
+			err := stream.Send(&pb.StreamedMmfResponse{Match: match})
+			// om-core doesn't retry sending MMF results; if your matchmaker cancels the
+			// context or stops responding, om-core drops the rest of the match results.
+			if err != nil {
+				logger.Errorf("Unable to stream match result back to matchmaker, dropping %v matches: %v, %v", len(matchChan)+1, err, context.Cause(ctx))
+				logger.Errorf("dropped: %v", match.GetId())
+				return
 			}
 		}
+		logger.Trace("ALL MMFS COMPLETE: exiting MMF results fan-in goroutine")
+		fanwg.Done()
+		return
 	}()
 
 	// Set up grpc dial options for all MMFs.
@@ -764,7 +780,6 @@ func (s *grpcServer) InvokeMatchmakingFunctions(req *pb.MmfRequest, stream pb.Op
 	// the client closes the stream; but best practice dictates /some/ timeout
 	// here (default 10 mins).
 	var opts []grpc.DialOption
-	mmfTimeout := time.Duration(cfg.GetInt("OM_MMF_TIMEOUT_SECS")) * time.Second
 	opts = append(opts,
 		grpc.WithConnectParams(grpc.ConnectParams{MinConnectTimeout: mmfTimeout}),
 	)
@@ -823,15 +838,6 @@ func (s *grpcServer) InvokeMatchmakingFunctions(req *pb.MmfRequest, stream pb.Op
 				"mmf_name": mmf.GetName(),
 				"mmf_host": mmfUrl.Host,
 			})
-
-			// Set a timeout for this API call, but use the empty
-			// background context. It is fully intended that MMFs can run
-			// longer than the matchmaker is willing to wait, so we want
-			// them not to get cancelled when the calling matchmaker
-			// cancels its context. However, best practices dictate that
-			// we define /some/ timeout (default: 10 mins)
-			ctx, cancel := context.WithTimeout(context.Background(), mmfTimeout)
-			defer cancel()
 
 			// TODO: Potential future optimization: cache connections/clients using a pool and re-use
 			var conn *grpc.ClientConn
@@ -1149,7 +1155,8 @@ func (s *grpcServer) InvokeMatchmakingFunctions(req *pb.MmfRequest, stream pb.Op
 
 	// Close matchChan, which will cause the MMF Result fan-in goroutine to exit.
 	logger.Trace("MMF waitgroup done, closing matchChan")
-	close(matchChan)
+	close(matchChan) // tell the fan-in goroutine that we're done sending
+	fanwg.Wait()     // wait for the fan-in goroutine to finish anything left in the channel
 
 	return nil
 }

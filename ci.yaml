@@ -1,0 +1,143 @@
+substitutions:
+  # Cloud deploy vars
+  _ARTIFACT_REGISTRY_URI: us-central1-docker.pkg.dev/open-match-build/om2
+  _JOB_NAME: om-core
+  _SERVICE_ACCOUNT: om2-ci@open-match-build.iam.gserviceaccount.com
+  _RUN_REGION: us-central1
+
+  # Application environment vars
+  _OM_LOGGING_LEVEL: info 
+  _OM_REDIS_WRITE_HOST: 10.82.52.86
+  _OM_REDIS_READ_HOST: 10.82.52.85
+steps:
+  # Update dependencies and build image
+  - name: 'golang:1.23'
+    id: "Update Dependencies"
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        go get -u
+        go mod tidy
+  # Run unit tests
+  - name: 'golang:1.23'
+    id: "Unit Tests"
+    waitFor: ["Update Dependencies"]
+    entrypoint: go
+    args: ['test', './...']
+  # Build
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: "Build"
+    waitFor: ["Update Dependencies"]
+    entrypoint: gcloud
+    args:
+      - builds
+      - submit
+      - --pack
+      - image=${_ARTIFACT_REGISTRY_URI}/${_JOB_NAME}:${COMMIT_SHA}
+  # Deploy existing container image to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: "Deploy:ingress vpc, all egress vpc"
+    waitFor: ["Build"] 
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      # service config
+      - ${_JOB_NAME}
+      - --no-allow-unauthenticated
+      - --concurrency
+      - "1000"
+      - --service-account
+      - ${_SERVICE_ACCOUNT}
+      - --region
+      - ${_RUN_REGION}
+
+      # Network config
+      - --network
+      - default
+      - --subnet
+      - default
+      - --vpc-egress
+      - all-traffic 
+
+      # ingress config
+      - --ingress
+      - all
+
+      # sidecar 'otel-collector' config
+      - --container
+      - "opentelemetry-collector"
+      - --image
+      - '${_ARTIFACT_REGISTRY_URI}/otel-collector-sidecar'
+
+      # 'core' config
+      - --container
+      - "core"
+      - --image
+      - '${_ARTIFACT_REGISTRY_URI}/${_JOB_NAME}:${COMMIT_SHA}'
+      - --port
+      - "8080"
+      - --memory
+      - 1024Mi
+
+      # env vars for 'core'
+      - --update-env-vars
+      - "OM_LOGGING_LEVEL=${_OM_LOGGING_LEVEL}"
+      - --update-env-vars
+      - "OM_REDIS_WRITE_HOST=${_OM_REDIS_WRITE_HOST}"
+      - --update-env-vars
+      - "OM_REDIS_READ_HOST=${_OM_REDIS_READ_HOST}"
+  # Simple E2E test on ticket creation
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: "Test:service health check"
+    waitFor: ["Deploy:ingress vpc, all egress vpc"]
+    entrypoint: 'bash'
+    args:
+      - -c
+      - |
+        # Exit on any error
+        set -e
+
+        echo "Test starts!"
+
+        # Create the static ticket JSON
+        cat > ticket.json << EOF
+        {
+            "ticket": {
+                "attributes": {
+                    "tags": [
+                        "1716274574658687844"
+                    ],
+                    "stringArgs": {
+                        "class": "dps"
+                    },
+                    "doubleArgs": {
+                        "1716274574658687844": 1716274574658687700
+                    },
+                    "creationTime": "2024-05-21T06:56:14.658687844Z"
+                }
+            }
+        }
+        EOF
+
+        # Impersonate the service account
+        TOKEN=$(gcloud auth print-identity-token \
+            --impersonate-service-account=${_SERVICE_ACCOUNT})
+        
+        # Make the request and store response
+        response=$(curl -s -H "Authorization: Bearer $${TOKEN}" \
+        -d "@ticket.json" \
+        https://om-core-205790239254.us-central1.run.app/tickets)
+        
+        echo "Response: $${response}"
+        
+        # Validate response format
+        if ! echo "$${response}" | grep -qE '^\{"ticketId":"[0-9]+-[0-9]+"\}$'; then
+            echo "Error: Response format is incorrect"
+            echo "Expected format: {\"ticketId\":\"NUMBER-NUMBER\"}"
+            echo "Received: $${response}"
+            exit 1
+        fi
+        
+        echo "Test passed successfully!"

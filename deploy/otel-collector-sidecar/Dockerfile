@@ -11,5 +11,5 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-FROM otel/opentelemetry-collector-contrib:0.101.0
+FROM otel/opentelemetry-collector-contrib
 ADD config.yaml /etc/otelcol-contrib/config.yaml

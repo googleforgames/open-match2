@@ -14,6 +14,8 @@ This repository is the public preview of the proposed second version of the "Cor
 
 Documentation will be added to the project over time.
 
+Testing CI removed sa
+
 ## Contributing to Open Match
 
 * We aim to keep this application scope as small as possible.

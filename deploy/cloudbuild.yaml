@@ -1,6 +1,6 @@
 # To use this cloudbuild.yaml from it's directory:
-#   gcloud builds submit --async --no-source \
-#     --substitutions=COMMIT_SHA=<CONTAINER_IMAGE_TAG_TO_DEPLOY>
+# gcloud builds submit --async --no-source \
+#   --substitutions=COMMIT_SHA=latest
 #
 # Depending on how your project is set up, you may need to add the required Cloud Run role
 # (https://cloud.google.com/run/docs/reference/iam/roles) to the cloud build
@@ -16,19 +16,19 @@
 
 substitutions:
   # Cloud deploy vars
-  _ARTIFACT_REGISTRY_URI: asia-northeast1-docker.pkg.dev/open-match-dev/open-match
-  _JOB_NAME: om-core 
-  _SERVICE_ACCOUNT: om-core-identity 
-  _RUN_REGION: asia-northeast1
+  _ARTIFACT_REGISTRY_URI: us-docker.pkg.dev/open-match-public-images/open-match2
+  _JOB_NAME: om-core
+  _SERVICE_ACCOUNT: $SERVICE_ACCOUNT
+  _RUN_REGION: us-central1
 
   # Application environment vars
   _OM_LOGGING_LEVEL: info 
-  _OM_REDIS_WRITE_HOST: 10.67.230.244 
-  _OM_REDIS_READ_HOST: 10.67.230.245 
+  _OM_REDIS_WRITE_HOST: $PRIMARY_ENDPOINT
+  _OM_REDIS_READ_HOST: $READ_ENDPOINT
 steps:
   # Deploy existing container image to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    id: "Deploy:ingress vpc, all egress vpc"
+    id: "Deploy:ingress all, all egress vpc"
     waitFor: ["-"]
     entrypoint: gcloud
     args:
@@ -54,13 +54,13 @@ steps:
 
       # ingress config
       - --ingress
-      - internal
+      - all
 
       # sidecar 'otel-collector' config
       - --container
       - "opentelemetry-collector"
       - --image
-      - asia-northeast1-docker.pkg.dev/open-match-dev/open-match/otel-collector-sidecar
+      - us-docker.pkg.dev/open-match-public-images/open-match2/otel-collector-sidecar
 
       # 'core' config
       - --container

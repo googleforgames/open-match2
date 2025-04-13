@@ -20,24 +20,21 @@ metadata:
     run.googleapis.com/ingress-status: all
     run.googleapis.com/launch-stage: BETA
   labels:
-    cloud.googleapis.com/location: asia-northeast1
+    cloud.googleapis.com/location: us-central1
   name: om-core
 spec:
   template:
     metadata:
       annotations:
         autoscaling.knative.dev/maxScale: '100'
-        run.googleapis.com/container-dependencies: '{"core":["opentelemetry-collector"]}'
         run.googleapis.com/network-interfaces: '[{"network": "default", "subnetwork": "default"}]'
         run.googleapis.com/vpc-access-egress: all-traffic
         run.googleapis.com/startup-cpu-boost: 'true'
         run.googleapis.com/execution-environment: gen1
-      labels:
-        run.googleapis.com/startupProbeType: Default
     spec:
       containerConcurrency: 1000 
       containers:
-      - image: asia-northeast1-docker.pkg.dev/open-match-dev/open-match/om-core@sha256:00720203989186b183a2589ab148ecf4ea7e2e861a3e29114f55c65585ab5a6a
+      - image: us-docker.pkg.dev/open-match-public-images/open-match2/om-core
         name: core 
         ports:
         - containerPort: 8080
@@ -45,17 +42,10 @@ spec:
         - name: OM_LOGGING_LEVEL
           value: debug
         - name: OM_REDIS_WRITE_HOST
-          value: 10.67.230.244
+          value: $PRIMARY_ENDPOINT
         - name: OM_REDIS_READ_HOST
-          value: 10.67.230.244
-      - image: asia-northeast1-docker.pkg.dev/open-match-dev/open-match/otel-collector-sidecar
+          value: $READ_ENDPOINT
+      - image: us-docker.pkg.dev/open-match-public-images/open-match2/otel-collector-sidecar
         name: opentelemetry-collector
-        startupProbe:
-          failureThreshold: 3
-          httpGet:
-            path: /
-            port: 13133
-          periodSeconds: 10
-          timeoutSeconds: 1
-      serviceAccountName: om-core-identity@open-match-dev.iam.gserviceaccount.com
+      serviceAccountName: $SERVICE_ACCOUNT
       timeoutSeconds: 300

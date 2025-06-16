@@ -26,7 +26,7 @@ In the context of Open Match, the term 'matchmaker' refers to the collection of 
 1. Notify players of their match assignments.
 1. Provide the custom matchmaking logic (as a Matchmaking Function, or MMF).
 
-These components can be a single, monolithic service, or have their duties federated across a number of platform services.
+These components can be a single, monolithic service, or have their duties federated across a number of platform services.  For an example of one way to build a matchmaker using Open Match 2, look at the [open-match-ecosystem repository v2/ directory](https://github.com/googleforgames/open-match-ecosystem/tree/main/v2).
 
 ## Documentation
 

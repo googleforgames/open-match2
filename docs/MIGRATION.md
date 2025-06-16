@@ -1,4 +1,4 @@
-この文書を日本語で[ Open Match 2: 技術的進化](MIGRATION-JP.md)
+この文書を日本語で[ Open Match 2: 技術的進化](jp/MIGRATION.md)
 
 # **Open Match 2: A Technical Evolution**
 

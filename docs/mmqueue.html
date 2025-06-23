@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Matchmaking Call Flows</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
+        body, html {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            background-color: #f8fafc;
+            font-family: 'Inter', sans-serif;
+            flex-direction: column;
+        }
+        .container {
+            width: 95%;
+            max-width: 900px;
+            background-color: white;
+            border-radius: 16px;
+            padding: 2rem;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+            margin-bottom: 2rem;
+        }
+        svg {
+            width: 100%;
+            height: auto;
+        }
+        hr {
+            border: 0;
+            height: 1px;
+            background-color: #e5e7eb;
+            width: 80%;
+            margin: 2rem 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <svg id="mmqueue-diagram" viewBox="0 0 800 550" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+                <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="0" refY="3.5" orient="auto">
+                    <polygon points="0 0, 10 3.5, 0 7" fill="#4b5563" />
+                </marker>
+                 <marker id="arrowhead-dashed" markerWidth="10" markerHeight="7" refX="0" refY="3.5" orient="auto">
+                    <polygon points="0 0, 10 3.5, 0 7" fill="#9ca3af" />
+                </marker>
+            </defs>
+            <text x="400" y="40" font-size="24" font-weight="600" text-anchor="middle" fill="#111827">Ticket Creation Flow</text>
+            <g id="actors-1">
+                <rect x="50" y="80" width="140" height="40" rx="8" fill="#e0f2fe" stroke="#38bdf8" stroke-width="2"></rect>
+                <text x="120" y="105" text-anchor="middle" font-weight="500" fill="#0c4a6e">Game Client</text>
+                <rect x="330" y="80" width="140" height="40" rx="8" fill="#dcfce7" stroke="#4ade80" stroke-width="2"></rect>
+                <text x="400" y="105" text-anchor="middle" font-weight="500" fill="#166534">Matchmaker Queue</text>
+                <rect x="610" y="80" width="140" height="40" rx="8" fill="#fee2e2" stroke="#f87171" stroke-width="2"></rect>
+                <text x="680" y="105" text-anchor="middle" font-weight="500" fill="#991b1b">Open Match Core</text>
+            </g>
+            <g id="lifelines-1">
+                <line x1="120" y1="120" x2="120" y2="520" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 4"/>
+                <line x1="400" y1="120" x2="400" y2="520" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 4"/>
+                <line x1="680" y1="120" x2="680" y2="520" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 4"/>
+            </g>
+            <g id="flow-1">
+                <line x1="130" y1="160" x2="390" y2="160" stroke="#4b5563" stroke-width="2" marker-end="url(#arrowhead)" />
+                <text x="260" y="150" text-anchor="middle" font-size="14" fill="#374151">1. Request Match</text>
+                <rect x="380" y="180" width="40" height="80" rx="4" fill="#dcfce7" stroke="#4ade80" stroke-width="1.5"></rect>
+                <path d="M 420 200 C 460 200, 460 220, 420 220" stroke="#4b5563" stroke-width="2" marker-end="url(#arrowhead)" fill="none" />
+                <text x="475" y="215" text-anchor="start" font-size="14" fill="#374151">2. Batch &amp; Rate-Limit</text>
+                <line x1="410" y1="280" x2="670" y2="280" stroke="#4b5563" stroke-width="2" marker-end="url(#arrowhead)" />
+                <text x="540" y="270" text-anchor="middle" font-size="14" fill="#374151">3. POST /tickets (CreateTicket)</text>
+                <rect x="660" y="280" width="40" height="60" rx="4" fill="#fee2e2" stroke="#f87171" stroke-width="1.5"></rect>
+                 <path d="M 700 300 C 740 300, 740 320, 700 320" stroke="#4b5563" stroke-width="2" marker-end="url(#arrowhead)" fill="none" />
+                 <text x="710" y="295" text-anchor="start" font-size="12" fill="#374151">Persist ticket</text>
+                 <text x="710" y="310" text-anchor="start" font-size="12" fill="#374151">(inactive state)</text>
+                <line x1="670" y1="360" x2="410" y2="360" stroke="#9ca3af" stroke-width="2" stroke-dasharray="5 5" marker-end="url(#arrowhead-dashed)"/>
+                <text x="540" y="350" text-anchor="middle" font-size="14" fill="#6b7280">4. Return TicketId</text>
+                <rect x="380" y="360" width="40" height="40" rx="4" fill="#dcfce7" stroke="#4ade80" stroke-width="1.5"></rect>
+                <line x1="410" y1="420" x2="670" y2="420" stroke="#4b5563" stroke-width="2" marker-end="url(#arrowhead)" />
+                <text x="540" y="410" text-anchor="middle" font-size="14" fill="#374151">5. POST /tickets:activate</text>
+                <rect x="660" y="420" width="40" height="40" rx="4" fill="#fee2e2" stroke="#f87171" stroke-width="1.5"></rect>
+                 <line x1="680" y1="480" x2="580" y2="480" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 4"/>
+                 <rect x="420" y="465" width="160" height="30" fill="#f3f4f6" rx="4"></rect>
+                 <text x="500" y="485" text-anchor="middle" font-size="14" fill="#374151">Ticket is now Active</text>
+            </g>
+        </svg>
+    </div>
+
+    <div class="container">
+        <svg id="matchmaker-diagram" viewBox="0 0 800 800" xmlns="http://www.w3.org/2000/svg">
+             <defs>
+                <marker id="arrowhead2" markerWidth="10" markerHeight="7" refX="0" refY="3.5" orient="auto">
+                    <polygon points="0 0, 10 3.5, 0 7" fill="#4b5563" />
+                </marker>
+                 <marker id="arrowhead-dashed2" markerWidth="10" markerHeight="7" refX="0" refY="3.5" orient="auto">
+                    <polygon points="0 0, 10 3.5, 0 7" fill="#9ca3af" />
+                </marker>
+            </defs>
+            <text x="400" y="40" font-size="24" font-weight="600" text-anchor="middle" fill="#111827">Matchmaker Call Flow</text>
+             <g id="actors-2">
+                <rect x="50" y="80" width="140" height="40" rx="8" fill="#e0f2fe" stroke="#38bdf8" stroke-width="2"></rect>
+                <text x="120" y="105" text-anchor="middle" font-weight="500" fill="#0c4a6e">Matchmaker</text>
+
+                <rect x="330" y="80" width="140" height="40" rx="8" fill="#fee2e2" stroke="#f87171" stroke-width="2"></rect>
+                <text x="400" y="105" text-anchor="middle" font-weight="500" fill="#991b1b">Open Match Core</text>
+                
+                <rect x="610" y="80" width="140" height="40" rx="8" fill="#e9d5ff" stroke="#a855f7" stroke-width="2"></rect>
+                <text x="680" y="105" text-anchor="middle" font-weight="500" fill="#581c87">MMF(s)</text>
+            </g>
+             <g id="lifelines-2">
+                <line x1="120" y1="120" x2="120" y2="780" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 4"/>
+                <line x1="400" y1="120" x2="400" y2="780" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 4"/>
+                <line x1="680" y1="120" x2="680" y2="780" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 4"/>
+            </g>
+            <g id="flow-2">
+                <!-- 1. Director -> OM Core -->
+                <line x1="130" y1="160" x2="390" y2="160" stroke="#4b5563" stroke-width="2" marker-end="url(#arrowhead2)" />
+                <text x="260" y="150" text-anchor="middle" font-size="14" fill="#374151">1. InvokeMatchmakingFunctions(Profile)</text>
+                
+                <!-- OM Core Processing 1 -->
+                <rect x="380" y="160" width="40" height="100" rx="4" fill="#fee2e2" stroke="#f87171" stroke-width="1.5"></rect>
+                <path d="M 420 180 C 500 180, 500 240, 420 240" stroke="#4b5563" stroke-width="2" marker-end="url(#arrowhead2)" fill="none" />
+                <text x="430" y="210" text-anchor="start" font-size="14" fill="#374151">2. Fill Pools from Ticket Cache</text>
+
+                <!-- 2. OM Core -> MMF -->
+                <line x1="410" y1="280" x2="670" y2="280" stroke="#4b5563" stroke-width="2" marker-end="url(#arrowhead2)" />
+                <text x="540" y="270" text-anchor="middle" font-size="14" fill="#374151">3. Run(Populated Profile)</text>
+                
+                <!-- MMF Processing -->
+                <rect x="660" y="280" width="40" height="60" rx="4" fill="#e9d5ff" stroke="#a855f7" stroke-width="1.5"></rect>
+                
+                <!-- 3. MMF -> OM Core -->
+                <line x1="670" y1="360" x2="410" y2="360" stroke="#9ca3af" stroke-width="2" stroke-dasharray="5 5" marker-end="url(#arrowhead-dashed2)"/>
+                <text x="540" y="350" text-anchor="middle" font-size="14" fill="#6b7280">4. Stream Match Proposals</text>
+
+                <!-- OM Core Processing 2 -->
+                <rect x="380" y="360" width="40" height="60" rx="4" fill="#fee2e2" stroke="#f87171" stroke-width="1.5"></rect>
+                <path d="M 420 380 C 460 380, 460 400, 420 400" stroke="#4b5563" stroke-width="2" marker-end="url(#arrowhead2)" fill="none" />
+                <text x="475" y="395" text-anchor="start" font-size="14" fill="#374151">5. Deactivate Tickets</text>
+
+                <!-- 4. OM Core -> Director -->
+                <line x1="390" y1="440" x2="130" y2="440" stroke="#9ca3af" stroke-width="2" stroke-dasharray="5 5" marker-end="url(#arrowhead-dashed2)"/>
+                <text x="260" y="430" text-anchor="middle" font-size="14" fill="#6b7280">6. Stream Matches</text>
+                
+                <!-- Director Processing -->
+                <rect x="100" y="440" width="40" height="240" rx="4" fill="#e0f2fe" stroke="#38bdf8" stroke-width="1.5"></rect>
+                <path d="M 140 470 C 220 470, 220 530, 140 530" stroke="#4b5563" stroke-width="2" marker-end="url(#arrowhead2)" fill="none" />
+                <text x="150" y="490" text-anchor="start" font-size="14" fill="#374151">7. Evaluate Matches</text>
+                <text x="150" y="510" text-anchor="start" font-size="14" fill="#374151">(Accept / Reject)</text>
+
+                <!-- Note for Accepted -->
+                <line x1="120" y1="580" x2="220" y2="580" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 4"/>
+                 <rect x="220" y="565" width="200" height="30" fill="#f3f4f6" rx="4"></rect>
+                 <text x="320" y="585" text-anchor="middle" font-size="14" fill="#374151">For Accepted: Allocate Server</text>
+
+                 <!-- 5. Director -> OM Core (Re-activation) -->
+                 <line x1="130" y1="640" x2="390" y2="640" stroke="#4b5563" stroke-width="2" marker-end="url(#arrowhead2)" />
+                 <text x="260" y="620" text-anchor="middle" font-size="14" fill="#374151">For Rejected Matches:</text>
+                 <text x="260" y="635" text-anchor="middle" font-size="14" fill="#374151">8. POST /tickets:activate</text>
+                
+                 <!-- OM Core processing (Re-activation) -->
+                 <rect x="380" y="640" width="40" height="40" rx="4" fill="#fee2e2" stroke="#f87171" stroke-width="1.5"></rect>
+
+                 <!-- Final State Note -->
+                 <line x1="400" y1="700" x2="500" y2="700" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 4"/>
+                 <rect x="500" y="685" width="240" height="30" fill="#f3f4f6" rx="4"></rect>
+                 <text x="620" y="705" text-anchor="middle" font-size="14" fill="#374151">Rejected tickets are Active again</text>
+
+
+            </g>
+        </svg>
+    </div>
+
+</body>
+</html>

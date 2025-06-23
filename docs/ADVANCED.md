@@ -298,7 +298,7 @@ The correct, more powerful pattern is to use time to your advantage by creating 
    * **For players waiting \> 30 seconds**: A third MMF (`wide-search-mmf`) that prioritizes getting players into *any* reasonable game, even if the ideal skill balance isn't met.  
 3. **Time Creates Better Opportunities**: This strategy embraces the continuous flow of players. You don't have to make a poor-quality match for a player who has only been waiting for 5 seconds. During peak hours, you may find that by waiting just a few more seconds, a much better-suited group of players will have joined the queue, allowing you to form a higher-quality match for everyone involved.
 
-This dovetails perfectly with the idea of a **match quality score**. Your MMFs can be designed to calculate a score for each match they propose. The `wide-search-mmf` might be configured to return matches with a score that is multipled by a 'wait factor' of 10x, and your Director can then use these scores to prioritize game server allocations for matches with players who have been waiting for a very long time.
+This dovetails perfectly with the idea of a **match quality score**. Your MMFs can be designed to calculate a score for each match they propose. The `wide-search-mmf` might be configured to return matches with a score that is multiplied by a 'wait factor' of 10x, and your Director can then use these scores to prioritize game server allocations for matches with players who have been waiting for a very long time.
 
 #### **Time as a Safeguard: The MMF Timeout (`OM_MMF_TIMEOUT_SECS`)**
 

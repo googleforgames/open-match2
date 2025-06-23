@@ -1,5 +1,3 @@
-.
-
 # Open Match \- Frequently Asked Questions & Tuning Guide
 
 Here are answers to common questions regarding the tuning, configuration, and best practices for Open Match.

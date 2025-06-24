@@ -89,7 +89,7 @@ func initializeOtel() (*otelmetrics.Meter, func(context.Context) error) {
 	if errors.Is(err, resource.ErrPartialResource) || errors.Is(err, resource.ErrSchemaURLConflict) {
 		otelLogger.Println(err) // Log non-fatal issues.
 	} else if err != nil {
-		otelLogger.Errorf(fmt.Errorf("Failed to create open telemetry resource: %w", err).Error())
+		otelLogger.WithError(err).Errorf("Failed to create open telemetry resource")
 
 	}
 
@@ -133,7 +133,7 @@ func initializeOtelWithLocalProm() (*otelmetrics.Meter, func(context.Context) er
 	if errors.Is(err, resource.ErrPartialResource) || errors.Is(err, resource.ErrSchemaURLConflict) {
 		otelLogger.Println(err) // Log non-fatal issues.
 	} else if err != nil {
-		otelLogger.Errorf(fmt.Errorf("Failed to create open telemetry resource: %w", err).Error())
+		otelLogger.WithError(err).Errorf("Failed to create open telemetry resource")
 
 	}
 

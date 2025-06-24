@@ -4,7 +4,7 @@ Open Match 2はOpenTelemetryを使用して、コアの操作、RPCコール、�
 
 このドキュメントでは、om-coreがインポートするgolangモジュールによって標準で提供される一部のメトリクス（rpcなど）については触れません 。
 
-Open Match 2に対して記述するマッチメーカーからもOpenTelemetryを使用してテレメトリーを出力することを推奨します。マッチメーカーのテレメトリーの例については、open-match-ecosystemリポジトリのサンプルを参照してください 。
+Open Match 2に対して記述するマッチメーカーからもOpenTelemetryを使用してテレメトリーを出力することを推奨します。マッチメーカーのテレメトリーの例については、[open-match-ecosystemリポジトリのサンプル](https://github.com/googleforgames/open-match-ecosystem/blob/main/v2/examples/METRICS-JP.md)を参照してください 。
 
 #### **Open Match 2でOpenTelemetryを有効化および設定する方法**
 

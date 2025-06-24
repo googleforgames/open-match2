@@ -1071,18 +1071,20 @@ func (s *grpcServer) InvokeMatchmakingFunctions(req *pb.MmfRequest, stream pb.Op
 						// long to replicate, but best practices require
 						// /some/ timeout.
 						timeout := time.After(time.Second * 60)
-						select {
-						case <-timeout:
-							// Log the timeout and continue.
-							logger.Errorf("Timeout while waiting for ticket %v deactivation to be replicated to local cache", ticketId)
-							return
-						default:
-							// There is always /some/ replication delay, sleep
-							// before first check.
-							time.Sleep(100 * time.Millisecond)
-							if _, replComplete := tc.InactiveSet.Load(ticketId); replComplete == true {
-								logger.Tracef("deactivation of ticket %v replicated to local cache", ticketId)
+						for {
+							select {
+							case <-timeout:
+								// Log the timeout and continue.
+								logger.Errorf("Timeout while waiting for ticket %v deactivation to be replicated to local cache", ticketId)
 								return
+							default:
+								// There is always /some/ replication delay, sleep
+								// before first check.
+								time.Sleep(100 * time.Millisecond)
+								if _, replComplete := tc.InactiveSet.Load(ticketId); replComplete == true {
+									logger.Tracef("deactivation of ticket %v replicated to local cache", ticketId)
+									return
+								}
 							}
 						}
 					}

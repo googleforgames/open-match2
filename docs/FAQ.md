@@ -1,3 +1,5 @@
+この文書を日本語で[Open Match 2 よくある質問とチューニングガイド](jp/FAQ.md)
+
 # Open Match \- Frequently Asked Questions & Tuning Guide
 
 Here are answers to common questions regarding the tuning, configuration, and best practices for Open Match.

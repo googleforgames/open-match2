@@ -11,7 +11,7 @@ substitutions:
   _OM_REDIS_READ_HOST: 10.82.52.85
 steps:
   # Update dependencies and build image
-  - name: 'golang:1.23'
+  - name: 'golang:1.24'
     id: "Update Dependencies"
     entrypoint: bash
     args:
@@ -20,7 +20,7 @@ steps:
         go get -u
         go mod tidy
   # Run unit tests
-  - name: 'golang:1.23'
+  - name: 'golang:1.24'
     id: "Unit Tests"
     waitFor: ["Update Dependencies"]
     entrypoint: go

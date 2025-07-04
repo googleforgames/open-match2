@@ -1048,6 +1048,16 @@ func (s *grpcServer) InvokeMatchmakingFunctions(req *pb.MmfRequest, stream pb.Op
 						}
 					}
 
+					// This checks if any of the tickets have been deactivated while the
+					// MMF was running and abandons the match if this is the case.
+					if cfg.GetBool("OM_MATCH_ABANDON_ON_INACTIVE_TICKET") {
+						for _, ticketId := range ticketIdsToDeactivate {
+							if _, ok := tc.InactiveSet.Load(ticketId); ok {
+								return;
+							}
+						}
+					}
+
 					// Kick off deactivation
 					logger.Tracef("deactivating tickets in %v", res.GetId())
 					errs := updateTicketsActiveState(ctx, logger, &tc, ticketIdsToDeactivate, store.Deactivate)

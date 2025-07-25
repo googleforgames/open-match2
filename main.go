@@ -1048,6 +1048,15 @@ func (s *grpcServer) InvokeMatchmakingFunctions(req *pb.MmfRequest, stream pb.Op
 						}
 					}
 
+					// Skipping deactivation for match with no tickets.
+					if len(ticketIdsToDeactivate) == 0 {
+						logger.WithFields(logrus.Fields{
+							"match_id": res.GetId(),
+							"reason":   "no tickets in match response",
+						}).Warn("Skipping deactivation for match with no tickets.")
+						return
+					}
+
 					// Kick off deactivation
 					logger.Tracef("deactivating tickets in %v", res.GetId())
 					errs := updateTicketsActiveState(ctx, logger, &tc, ticketIdsToDeactivate, store.Deactivate)

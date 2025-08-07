@@ -69,6 +69,14 @@ A: Open Match assumes that if this information is important to you, your MMF wil
 
 A: This is a best practice for managing metric cardinality. Telemetry systems can be overwhelmed if they receive too many unique labels. By using a format like `com.mygame.gamemode.ranked-4v4.us-west1.2025-09-2718:00:00.000`, monitoring tools can easily aggregate metrics by stripping the most specific parts of the name (e.g., aggregating all metrics under `com.mygame.gamemode.ranked-4v4.us-west1`). For a deeper dive on this topic, [the Grafana blog has an excellent article on cardinality spikes](https://grafana.com/blog/2022/02/15/what-are-cardinality-spikes-and-why-do-they-matter/).
 
+**Can I prevent Open Match from deactivating tickets in a match returned by my MMF? I want to evaluate the match quality in my Director first.**
+
+A: No, you cannot disable this behavior directly. Open Match will always deactivate the tickets found in the `roster` of any matches your MMF returns.
+
+However, you can work around this by having your MMF leave the `roster` field empty and instead place the proposed players into the `extensions` field of the match. Your Director can then be coded to inspect the `extensions`. If it approves the match, it is then responsible for manually calling `DeactivateTickets` for the players in that match.
+
+Be aware of the trade-off: until your Director deactivates those tickets, they remain active in Open Match and will be included in subsequent matchmaking cycles!
+
 ---
 
 #### **Troubleshooting**
@@ -80,6 +88,16 @@ A: This is almost always a networking issue. Check to ensure that the service wh
 **Q: I'm using the gRPC-gateway and my client is failing to unmarshal the response from `InvokeMMFs`.**
 
 A: This is an easy-to-miss detail of how the gRPC-gateway works. It wraps the actual response payload inside a parent JSON object under the key `"result"`. When you are unmarshalling the response, you need to extract the content of the `"result"` key first before passing it to your protobuf JSON unmarshaller.
+
+---
+
+#### **Division of responsibility**
+
+**Q: There's an edge case that sometimes happens when matching. Can Open Match handle it for me?**
+
+A: The design philosophy of Open Match is to remain unopinionated about how to handle specific edge cases. If a remediation for an edge case _could_ be handled by Open Match but would also likely need to be handled by most matchmakers, the responsibility is left to the matchmaker. This approach keeps the behavior of Open Match consistent and avoids being prescriptive. For example, one game's discarded match might be another game's backfill opportunity.
+
+For more examples of failure states your matchmaker is expected to handle, see the **Failure Handling** section of this FAQ.
 
 ---
 

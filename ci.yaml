@@ -5,30 +5,31 @@ substitutions:
   _SERVICE_ACCOUNT: om2-ci@open-match-build.iam.gserviceaccount.com
   _RUN_REGION: us-central1
 
+  # In priciple, we should always be doing our CI/CD against an up-to-date
+  # version of the golang build chain. If 'latest' causes a build failure that
+  # requires a specific revision of the golang builder in order to succeed,
+  # this should always be considered a **temporary remediation**.  In this
+  # case, you should update this CI configuration to the specific golang
+  # builder tag required for the build to succeed, file a github issue saying
+  # you did this, and add a comment here with a link to the github issue.  The
+  # maintainers should prioritize fixing the underlying problem and getting the
+  # repository to successfully build using the latest golang builder in the
+  # next release, and revert this tag back to 'latest' in that release.  
+  _GOLANG_VERSION: latest 
+
   # Application environment vars
   _OM_LOGGING_LEVEL: info 
   _OM_REDIS_WRITE_HOST: 10.82.52.86
   _OM_REDIS_READ_HOST: 10.82.52.85
 steps:
-  # Update dependencies and build image
-  - name: 'golang:1.24'
-    id: "Update Dependencies"
-    entrypoint: bash
-    args:
-      - -c
-      - |
-        go get -u
-        go mod tidy
   # Run unit tests
-  - name: 'golang:1.24'
+  - name: 'golang:${_GOLANG_VERSION}'
     id: "Unit Tests"
-    waitFor: ["Update Dependencies"]
     entrypoint: go
     args: ['test', './...']
   # Build
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: "Build"
-    waitFor: ["Update Dependencies"]
     entrypoint: gcloud
     args:
       - builds

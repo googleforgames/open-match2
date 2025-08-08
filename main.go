@@ -722,11 +722,13 @@ func (s *grpcServer) InvokeMatchmakingFunctions(req *pb.MmfRequest, stream pb.Op
 		}
 		for name, participantRoster := range chunk {
 			logger.Debugf("making chunk containing %v tickets", len(participantRoster))
-			profile.GetPools()[name] = &pb.Pool{
-				Participants: &pb.Roster{
-					Name:    name + "_roster",
-					Tickets: participantRoster,
-				},
+			// Make a copy of the empty pool from the original request's
+			// profile, and then fill in as much of the participant roster as
+			// will fit in this chunk.
+			profile.GetPools()[name] = req.GetProfile().GetPools()[name]
+			profile.GetPools()[name].Participants = &pb.Roster{
+				Name:    name + "_roster",
+				Tickets: participantRoster,
 			}
 		}
 		chunkedRequest[chunkIndex] = &pb.ChunkedMmfRunRequest{

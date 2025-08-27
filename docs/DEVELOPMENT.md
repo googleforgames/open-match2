@@ -19,7 +19,17 @@ There is no `cloudbuild.yaml` or `Dockerfile` required for this. [Google Cloud's
 
 The following represent best practices but not required when doing a new release:
 
-* Go to [cloud.google.com](cloud.google.com) and open a clean Cloud Shell terminal. Run `go version` and use that version in the `go.mod` files in Open Match 2 related projects (`go mod edit -go=<VERSION>`). This ensures users can easily build it locally in Cloud Shell, and the golang version installed in Cloud Shell gets updated pretty regularly, and is usually only a couple minor versions behind the latest stable release.
+* Go to [cloud.google.com](cloud.google.com) and open a clean Cloud Shell terminal. Run `go version` to find the version offered by default in Cloud Shell. Then kick off a Cloud Build using pack (as in the command above) and find the lines that specify the default version of Golang being used there.  You should see lines similar to this in the build logs:
+```
+Step #1: ===> BUILDING
+Step #1: [builder] target distro name/version labels not found, reading /etc/os-release file
+Step #1: [builder] === Go - Runtime (google.go.runtime@0.9.1) ===
+Step #1: [builder] Go version not specified, using latest available Go runtime for the stack "ubuntu2204"
+Step #1: [builder] 2025/08/27 06:00:39 [DEBUG] GET https://go.dev/dl/?mode=json
+Step #1: [builder] ***** CACHE MISS: "go"
+Step #1: [builder] Installing Go v1.24.6.
+``` 
+use the lower of these two versions in the `go.mod` files in Open Match 2 related projects (`go mod edit -go=<VERSION>`). This is to ensure that users following the instructions to build in their own projects can do their own builds using the default Cloud Shell environment and the latest Google Cloud buildpacks.
 * After verifying that the build works with the latest dependencies, commit any changes to `go.mod` to the repo. 
 
 ## Deploy

@@ -211,7 +211,7 @@ func registerMetrics(meterPointer *otelmetrics.Meter) {
 	}
 
 	otelFailedIdsPerActivateCall, err = meter.Int64Histogram(
-		metricsNamePrefix+"ticket.deactivation.failures.unspecified",
+		metricsNamePrefix+"ticket.activation.failures.unspecified",
 		otelmetrics.WithDescription("Ticket activations per ActivateTickets rpc call that failed due to an unspecified error"),
 	)
 	if err != nil {

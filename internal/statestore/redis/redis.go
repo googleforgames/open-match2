@@ -181,12 +181,31 @@ func New(cfg *viper.Viper) (*redisReplicator, error) {
 							// backoff.RetryNotify() evaluates to determine if it
 							// needs to retry this operation.
 							rConnLogger.Debug("dialing Redis read replica")
-							conn, err = redis.Dial("tcp",
-								readRedisUrl,
+
+							// Dial options
+							dialOptions := []redis.DialOption{
 								redis.DialUsername(cfg.GetString("OM_REDIS_READ_USER")),
 								redis.DialPassword(cfg.GetString("OM_REDIS_READ_PASSWORD")),
 								redis.DialConnectTimeout(cfg.GetDuration("OM_REDIS_POOL_IDLE_TIMEOUT")),
 								redis.DialReadTimeout(cfg.GetDuration("OM_REDIS_POOL_IDLE_TIMEOUT")),
+							}
+
+							// Add option to use TLS if config flag is set
+							if cfg.GetBool("OM_REDIS_USE_TLS") {
+								rConnLogger.Info("OM_REDIS_USE_TLS is set to true, will attempt to connect to Redis read replica(s) using TLS.")
+								dialOptions = append(dialOptions, redis.DialUseTLS(true))
+							}
+
+							// Skip TLS cert verification if config flag is set
+							// (e.g., for self-signed certs)
+							if cfg.GetBool("OM_REDIS_TLS_SKIP_VERIFY") {
+								rConnLogger.Info("OM_REDIS_TLS_SKIP_VERIFY is set to true, will attempt to connect to Redis read replica(s) using TLS without verifying the TLS certificate.")
+								dialOptions = append(dialOptions, redis.DialTLSSkipVerify(true))
+							}
+
+							conn, err = redis.Dial("tcp",
+								readRedisUrl,
+								dialOptions...,
 							)
 							if err != nil { // Check for error on dial
 								rConnLogger.Error("failure dialing Redis read replica")
@@ -244,13 +263,33 @@ func New(cfg *viper.Viper) (*redisReplicator, error) {
 							// backoff.RetryNotify() evaluates to determine if it
 							// needs to retry this operation.
 							wConnLogger.Debug("dialing Redis write instance")
-							conn, err = redis.Dial("tcp",
-								writeRedisUrl,
+
+							// Dial options
+							dialOptions := []redis.DialOption{
 								redis.DialUsername(cfg.GetString("OM_REDIS_WRITE_USER")),
 								redis.DialPassword(cfg.GetString("OM_REDIS_WRITE_PASSWORD")),
 								redis.DialConnectTimeout(cfg.GetDuration("OM_REDIS_POOL_IDLE_TIMEOUT")),
 								redis.DialReadTimeout(cfg.GetDuration("OM_REDIS_POOL_IDLE_TIMEOUT")),
+							}
+
+							// Add option to use TLS if config flag is set
+							if cfg.GetBool("OM_REDIS_USE_TLS") {
+								wConnLogger.Info("OM_REDIS_USE_TLS is set to true, will attempt to connect to Redis write instance using TLS.")
+								dialOptions = append(dialOptions, redis.DialUseTLS(true))
+							}
+
+							// Skip TLS cert verification if config flag is set
+							// (e.g., for self-signed certs)
+							if cfg.GetBool("OM_REDIS_TLS_SKIP_VERIFY") {
+								wConnLogger.Info("OM_REDIS_TLS_SKIP_VERIFY is set to true, will attempt to connect to Redis write instance using TLS without verifying the TLS certificate.")
+								dialOptions = append(dialOptions, redis.DialTLSSkipVerify(true))
+							}
+
+							conn, err = redis.Dial("tcp",
+								writeRedisUrl,
+								dialOptions...,
 							)
+
 							if err != nil { // Check for error on dial
 								wConnLogger.Error("failure dialing Redis write instance")
 							}

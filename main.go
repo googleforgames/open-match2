@@ -1065,7 +1065,7 @@ func (s *grpcServer) InvokeMatchmakingFunctions(req *pb.MmfRequest, stream pb.Op
 					if len(errs) > 0 {
 						logger.Errorf("Error deactivating match %v tickets: %v", res.GetId(), err)
 					}
-					otelMmfTicketDeactivations.Add(ctx, int64(min(0, len(ticketIdsToDeactivate)-len(errs))),
+					otelMmfTicketDeactivations.Add(ctx, int64(len(ticketIdsToDeactivate)-len(errs)),
 						metric.WithAttributes(
 							attribute.String("mmf.name", mmf.GetName()),
 							attribute.String("profile.name", profileName),

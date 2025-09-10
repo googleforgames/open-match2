@@ -2,6 +2,8 @@
 
 Open Match 2 `core` (aka `om-core`) is a golang application designed to be built using [CNCF Buildpacks](https://www.cncf.io/projects/buildpacks/), and our primary build process specifically uses [Google Cloud's buildpacks](https://cloud.google.com/docs/buildpacks/overview). 
 
+Our target development environment is the default Cloud Shell you get by clicking 'Activate Cloud Shell' button (terminal icon) in the upper-right of the [console.cloud.google.com](https://console.cloud.google.com/) web UI.
+
 ## Build
 
 > [!NOTE]

@@ -89,6 +89,14 @@ func Read() *viper.Viper {
 	cfg.SetDefault("OM_REDIS_POOL_MAX_ACTIVE", 500)
 	cfg.SetDefault("OM_REDIS_POOL_IDLE_TIMEOUT", time.Minute)
 
+	// Enable TLS for Redis connections.  Cannot be controlled independently on
+	// a per-instance basis; it is either on for the write host and all read
+	// hosts, or off for all of them.
+	cfg.SetDefault("OM_REDIS_USE_TLS", false)
+	// It is recommended that you use a cert signed by a CA for production
+	// environments for security reasons.
+	cfg.SetDefault("OM_REDIS_TLS_SKIP_VERIFY", false)
+
 	// these env vars are populated with the memorystore instance details at
 	// runtime if running on Cloud Run with the Memorystore for Redis
 	// integration

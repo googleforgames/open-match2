@@ -57,9 +57,17 @@ A: If you have profiles designed to fill partially-empty, running game servers, 
 
 A: Open Match always calculates a ticket's expiration time based on its `creation_time`. If you manually provide a `creation_time` that is very old (e.g., the Unix epoch of January 1st, 1970\) and the default TTL is 10 minutes, the ticket will be considered expired the moment it is created.
 
-**Q: Can I just set a really long TTL to prevent tickets from expiring?**
+**Q: Can I just set a really long TTL to prevent tickets from expiring?  How should I calculate the correct value for `OM_CACHE_TICKET_TTL_MS?`**
 
-A: This is strongly discouraged. Open Match relies on a reasonably-configured TTL to manage the size of its in-memory cache and to keep the replication process snappy. The best practice is to set a TTL that covers the vast majority of your matchmaking times. For exceptional cases where a ticket needs to live longer, you should implement a "re-up" mechanism in your own matchmaker logic, as described in the [advanced topic](ADVANCED.md) on handling long-lived tickets.
+A: Do not use this setting to handle edge cases or "forever" queues. A TTL that is too long will cause successfully matched (inactive) tickets to accumulate in the system memory until their TTL expires, which increases load and memory pressure. You should set this value to be slightly longer than the time it takes to find a match for 95% of your player base (assuming a normal distribution), but no longer.
+
+A practical example of how to derive this number:
+
+1. Analyze your matchmaking data: Determine how long it takes to find a match for the vast majority of your players. For example, if your player skill distribution is normal, you might find that 95% of players are matched within 5 minutes.
+1. Define your "Hard Deadline": Decide on the maximum time a player should wait before your game client takes drastic action (like restarting the search with wider parameters or telling the player to try again later). Let's say this is 7 minutes.
+1. Set the TTL: Set `OM_CACHE_TICKET_TTL_MS` to slightly more than that hard deadline (e.g., 7 minutes and 30 seconds).
+
+Any player waiting longer than 7 minutes is an edge case. You should handle them using the [Long-Lived Tickets pattern from the Advanced topics documentation](ADVANCED.md#handling-long-lived-tickets): detect the approaching expiration on the client/frontend, and transparently re-create a new ticket with high-priority flags. This keeps the Open Match core lean and performant while still supporting long wait times for specific players.
 
 **Q: Why doesn't `InvokeMatchmakingFunctions` tell me how many tickets were in each pool?**
 

@@ -373,7 +373,6 @@ func (tc *ReplicatedTicketCache) IncomingReplicationQueue(ctx context.Context) {
 					// Ensure that when expiring a ticket from the inactive set, the ticket is always deleted as well.
 					_, existed := tc.Tickets.LoadAndDelete(id)
 					if existed {
-						numTickets++
 						numTicketDeletions++
 					}
 

@@ -17,9 +17,9 @@ package filter
 import (
 	"fmt"
 
+	pb "github.com/googleforgames/open-match2/v2/pkg/pb"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	pb "github.com/googleforgames/open-match2/v2/pkg/pb"
 )
 
 var (
@@ -75,13 +75,13 @@ func In(pool *pb.Pool, ticket *pb.Ticket) bool {
 		}
 		// Created on the filter Start timestamp
 		if crTimeFilter.GetBounds() == pb.Pool_EXCLUDE_START || crTimeFilter.GetBounds() == pb.Pool_EXCLUDE_BOTH {
-			if crTime == crTimeFilterStart {
+			if crTime.Equal(crTimeFilterStart) {
 				return false
 			}
 		}
 		// Created on the filter End timestamp
 		if crTimeFilter.GetBounds() == pb.Pool_EXCLUDE_END || crTimeFilter.GetBounds() == pb.Pool_EXCLUDE_BOTH {
-			if crTime == crTimeFilterEnd {
+			if crTime.Equal(crTimeFilterEnd) {
 				return false
 			}
 		}

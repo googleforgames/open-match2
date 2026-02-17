@@ -437,6 +437,7 @@ func (rr *redisReplicator) SendUpdates(updates []*store.StateUpdate) []*store.St
 			logger.WithFields(logrus.Fields{
 				"redis_command": redisCmdWithArgs,
 			}).Errorf("Redis error: %v", err)
+			out[i].Err = fmt.Errorf("failed to queue redis command: %w", err)
 		}
 	}
 

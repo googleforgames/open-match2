@@ -19,9 +19,9 @@ import (
 	"strconv"
 	"time"
 
+	store "github.com/googleforgames/open-match2/v2/internal/statestore/datatypes"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
-	store "github.com/googleforgames/open-match2/v2/internal/statestore/datatypes"
 )
 
 var (
@@ -52,7 +52,7 @@ func New(cfg *viper.Viper) *memoryReplicator {
 		// replication id strings, which are redis stream entry ids.
 		// https://redis.io/docs/data-types/streams/#entry-ids
 		replIdValidator: regexp.MustCompile(`^\d{13}-\d+$`),
-		replChan:        make(chan *store.StateUpdate),
+		replChan:        make(chan *store.StateUpdate, cfg.GetInt("OM_CACHE_IN_MAX_UPDATES_PER_POLL")),
 		replTS:          time.Now(),
 		replCount:       0,
 		cfg:             cfg,

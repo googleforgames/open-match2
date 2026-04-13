@@ -202,6 +202,9 @@ message MatchmakingFunctionSpec {
   }
 }
 
+message HealthCheckRequest  { }
+message HealthCheckResponse { string status = 1; }
+
 // API reponse/request messages, used by api.proto and mmf.proto
 //--------------------------------------------------------------
 // Arguments sent to your MMF can be more than the maximum gRPC message size of

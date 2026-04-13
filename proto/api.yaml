@@ -31,6 +31,9 @@ http:
       post: /tickets:activate
       body: "*"
 
+    - selector: open_match2.OpenMatchService.HealthCheck
+      get: /health
+
     - selector: open_match2.OpenMatchService.InvokeMatchmakingFunctions
       post: /matches:fetch
       body: "*"

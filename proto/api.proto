@@ -69,6 +69,8 @@ service OpenMatchService {
   //    when they finish.
   rpc InvokeMatchmakingFunctions(MmfRequest)        returns (stream StreamedMmfResponse) { }
 
+  rpc HealthCheck(HealthCheckRequest)               returns (HealthCheckResponse) { }
+
   // *** NOTE: DEPRECATED RPCs BELOW, DO NOT USE IN PRODUCTION ***
 
   // CreateAssignments creates an assignment for each ticket in the request's AssignmentRoster

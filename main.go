@@ -1176,6 +1176,10 @@ func (s *grpcServer) InvokeMatchmakingFunctions(req *pb.MmfRequest, stream pb.Op
 	return nil
 }
 
+func (s *grpcServer) HealthCheck(ctx context.Context, req *pb.HealthCheckRequest) (*pb.HealthCheckResponse, error) {
+	return &pb.HealthCheckResponse{Status: "ok"}, nil
+}
+
 //----------------------------------------------------------------------------------
 // [DEPRECATED] CreateAssignments()
 // [DEPRECATED] WatchAssignments()

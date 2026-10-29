@@ -14,14 +14,16 @@
 package memoryReplicator
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
+	"sync"
 	"time"
 
+	store "github.com/googleforgames/open-match2/v2/internal/statestore/datatypes"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
-	store "github.com/googleforgames/open-match2/v2/internal/statestore/datatypes"
 )
 
 var (
@@ -30,6 +32,11 @@ var (
 		"component":  "statestore",
 		"replicator": "memory",
 	})
+	NoTicketKeyErr          = store.NoTicketKeyErr
+	NoTicketDataErr         = store.NoTicketDataErr
+	NoAssignmentErr         = store.NoAssignmentErr
+	InvalidInputErr         = store.InvalidInputErr
+	FullReplicationQueueErr = errors.New("Replication queue full")
 )
 
 // Local, in-memory state storage.  This mocks a subset of the
@@ -41,18 +48,23 @@ type memoryReplicator struct {
 	replTS          time.Time
 	replCount       int
 	replIdValidator *regexp.Regexp
+	mu              sync.Mutex
 }
 
 func New(cfg *viper.Viper) *memoryReplicator {
 	logger.WithFields(logrus.Fields{
 		"repl_id": "N/A",
 	}).Debugf("Initializing cache")
+	chanCap := cfg.GetInt("OM_CACHE_IN_MAX_UPDATES_PER_POLL")
+	if queueBuf := cfg.GetInt("OM_CACHE_IN_QUEUE_BUFFER_SIZE"); queueBuf > chanCap {
+		chanCap = queueBuf
+	}
 	return &memoryReplicator{
 		// replIdValidator is a regular expression that can be used to match
 		// replication id strings, which are redis stream entry ids.
 		// https://redis.io/docs/data-types/streams/#entry-ids
 		replIdValidator: regexp.MustCompile(`^\d{13}-\d+$`),
-		replChan:        make(chan *store.StateUpdate),
+		replChan:        make(chan *store.StateUpdate, chanCap),
 		replTS:          time.Now(),
 		replCount:       0,
 		cfg:             cfg,
@@ -68,26 +80,31 @@ func (rc *memoryReplicator) GetUpdates() (out []*store.StateUpdate) {
 
 	// TODO: histogram for number of updates, length of poll
 
-	// Timeout
-	timeout := time.After(time.Millisecond * time.Duration(rc.cfg.GetInt("OM_CACHE_IN_WAIT_TIMEOUT_MS")))
+	out = make([]*store.StateUpdate, 0)
+	maxUpdates := rc.cfg.GetInt("OM_CACHE_IN_MAX_UPDATES_PER_POLL")
+	timer := time.NewTimer(time.Millisecond * time.Duration(rc.cfg.GetInt("OM_CACHE_IN_WAIT_TIMEOUT_MS")))
+	defer timer.Stop()
 
-	// Local vars
-	var thisUpdate *store.StateUpdate
-	more := true
+	select {
+	case firstUpdate, more := <-rc.replChan:
+		if !more {
+			return out
+		}
+		out = append(out, firstUpdate)
+	case <-timer.C:
+		return out
+	}
 
-	for more {
+drainLoop:
+	for len(out) < maxUpdates {
 		select {
-		case thisUpdate, more = <-rc.replChan:
-			if more {
-				// adapted from https://go.dev/ref/spec#Receive_operator
-				// The value of more is true if the value received was
-				// delivered by a successful send operation to the channel, or
-				// false if it is a zero value generated because the channel is
-				// closed and empty.
-				out = append(out, thisUpdate)
+		case nextUpdate, more := <-rc.replChan:
+			if !more {
+				break drainLoop
 			}
-		case <-timeout:
-			more = false
+			out = append(out, nextUpdate)
+		default:
+			break drainLoop
 		}
 	}
 
@@ -105,16 +122,94 @@ func (rc *memoryReplicator) SendUpdates(updates []*store.StateUpdate) []*store.S
 		"direction": "sendUpdates",
 	})
 
-	out := make([]*store.StateResponse, 0)
-	for _, up := range updates {
+	out := make([]*store.StateResponse, len(updates))
+	for i, up := range updates {
+		if up == nil {
+			out[i] = &store.StateResponse{Result: "", Err: InvalidInputErr}
+			continue
+		}
+
+		copied := &store.StateUpdate{Cmd: up.Cmd}
+		var validationErr error
+
+		switch up.Cmd {
+		case store.Ticket:
+			if len(up.Value) == 0 {
+				validationErr = NoTicketDataErr
+				break
+			}
+			copied.Value = up.Value
+		case store.Activate, store.Deactivate:
+			if len(up.Keys) > 0 {
+				validKeys := make([]string, 0, len(up.Keys))
+				for _, k := range up.Keys {
+					if k == "" {
+						logger.Warnf("skipping empty ticket key in packed update: %v", up)
+						continue
+					}
+					validKeys = append(validKeys, k)
+				}
+				if len(validKeys) == 0 {
+					validationErr = NoTicketKeyErr
+					break
+				}
+				copied.Key = validKeys[0]
+				if len(validKeys) > 1 {
+					copied.Keys = validKeys
+				}
+			} else {
+				if len(up.Key) == 0 {
+					validationErr = NoTicketKeyErr
+					break
+				}
+				copied.Key = up.Key
+			}
+		case store.Assign:
+			if len(up.Key) == 0 {
+				validationErr = NoTicketKeyErr
+				break
+			}
+			if len(up.Value) == 0 {
+				validationErr = NoAssignmentErr
+				break
+			}
+			copied.Key = up.Key
+			copied.Value = up.Value
+		default:
+			validationErr = InvalidInputErr
+		}
+
+		if validationErr != nil {
+			out[i] = &store.StateResponse{
+				Result: up.PrimaryKey(),
+				Err:    validationErr,
+			}
+			continue
+		}
+
+		rc.mu.Lock()
+		prevTS := rc.replTS
+		prevCount := rc.replCount
 		replId := rc.getReplId()
 		// Creating a new ticket generates a new ID in redis
 		// so mock that here.
-		if up.Cmd == store.Ticket {
-			up.Key = replId
+		if copied.Cmd == store.Ticket {
+			copied.Key = replId
 		}
-		rc.replChan <- up
-		out = append(out, &store.StateResponse{Result: replId, Err: nil})
+		copied.ReplId = replId
+
+		select {
+		case rc.replChan <- copied:
+			out[i] = &store.StateResponse{Result: replId, Err: nil}
+		default:
+			rc.replTS = prevTS
+			rc.replCount = prevCount
+			out[i] = &store.StateResponse{
+				Result: up.PrimaryKey(),
+				Err:    FullReplicationQueueErr,
+			}
+		}
+		rc.mu.Unlock()
 	}
 	logger.Tracef("%v updates applied to state storage for replication (maximum number set by OM_REDIS_PIPELINE_MAX_QUEUE_THRESHOLD config variable)", len(updates))
 
@@ -124,13 +219,14 @@ func (rc *memoryReplicator) SendUpdates(updates []*store.StateUpdate) []*store.S
 // GetReplId mocks how Redis Streams generate entry IDs
 // https://redis.io/docs/data-types/streams/#entry-ids
 func (rc *memoryReplicator) getReplId() string {
-	if time.Now().UnixMilli() == rc.replTS.UnixMilli() {
+	now := time.Now()
+	if now.UnixMilli() <= rc.replTS.UnixMilli() {
 		rc.replCount += 1
 	} else {
-		rc.replTS = time.Now()
+		rc.replTS = now
 		rc.replCount = 0
 	}
-	id := fmt.Sprintf("%v-%v", strconv.FormatInt(rc.replTS.UnixMilli(), 10), rc.replCount)
+	id := fmt.Sprintf("%013d-%s", rc.replTS.UnixMilli(), strconv.Itoa(rc.replCount))
 	return id
 }
 

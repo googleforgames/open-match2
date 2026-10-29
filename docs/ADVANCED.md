@@ -88,8 +88,11 @@ This is the most important part of the "fire-and-forget" model: **You are not re
 
 When your Matchmaking Function (MMF) returns a `Match` to Open Match core, the core service automatically performs the following actions on your behalf:
 
-* It inspects all the `Tickets` within the `Match`.  
-* It marks every one of those tickets as **inactive**.
+* **Roster Ticket ID Validation**: It inspects all the `Tickets` across the `rosters` within the `Match` and validates each ticket ID against the state store's replication ID format. Any malformed ticket IDs are logged, skipped for deactivation, and listed in the match's `extensions` map under the `"invalid_ticket_ids"` key (a `google.protobuf.ListValue` of strings) so your Director knows which tickets Open Match core did not deactivate.
+* **Every Match Is Returned**: Open Match core returns every match the MMF streams back exactly as received (plus the extensions described here), including matches with no valid ticket IDs (for example diagnostic or feedback matches) and responses with no match at all. Because there is nothing to deactivate for them, they are returned immediately; Open Match core makes no ordering guarantee between matches.
+* **MMF Failures Are Returned**: If any MMF fails, Open Match core still streams every returned match, then ends the stream with a `codes.Internal` error whose message summarizes each failure, with one `google.rpc.ErrorInfo` detail per failed MMF (reason `MMF_FAILURE`, metadata `mmf_name`, `grpc_code`, `message`). Over the HTTP `grpc-gateway`, this arrives as a final line containing an `"error"` object in the response stream.
+* **Automatic State Update**: It marks every valid ticket in the match as **inactive** by writing a deactivation update to the state store.
+* **Configurable Deactivation Wait (`OM_MATCH_TICKET_DEACTIVATION_WAIT` and `OM_MATCH_TICKET_DEACTIVATION_TIMEOUT_MS`)**: When `OM_MATCH_TICKET_DEACTIVATION_WAIT` is `true` (the default), Open Match core waits up to `OM_MATCH_TICKET_DEACTIVATION_TIMEOUT_MS` (default `60000` ms) for the ticket deactivations to replicate back into its local cache before streaming the `Match` to your Director. If the deactivation write fails or the local replication wait times out, Open Match core still streams the `Match` to your Director, but annotates the match's `extensions` map with a `google.protobuf.BoolValue` (`true`) under the `"deactivation_timeout"` key (and increments the `om_core.mmf.deactivation.timeouts` metric) so your Director can detect that local replication was not confirmed in time. In this mode, Open Match core also lists any ticket whose deactivation write failed (and so may still be active) under the `"deactivation_failed_ticket_ids"` key (a `google.protobuf.ListValue` of strings). When `OM_MATCH_TICKET_DEACTIVATION_WAIT` is `false`, Open Match core streams the match back to your Director immediately and deactivates the tickets asynchronously in the background, and therefore cannot report failed deactivation writes on the match.
 
 This automatic deactivation, as seen in the `InvokeMatchmakingFunctions` logic, ensures that a player who has just been assigned to a game isn't immediately put back into the matchmaking pool for another one. It's a core feature that simplifies your matchmaker logic significantly.
 
@@ -105,7 +108,7 @@ For example, if a player:
 
 In these cases, their `Ticket` is still `active` in Open Match. You should then call `DeactivateTickets` with that player's `TicketId` to immediately remove them from matchmaking consideration. This prevents them from being placed in a match they can no longer join.
 
-**Handling Long-Lived Tickets**
+### Handling Long-Lived Tickets
 
 What if your game design requires players to wait in a queue for longer than the configured Ticket TTL? Since you cannot override the maximum TTL, you must handle this logic in your own application code, outside of Open Match core. This is an advanced pattern for an exceptional use case.
 
@@ -252,18 +255,26 @@ This is not a bug; it is a deliberate and standard design pattern for high-perfo
 
 #### **How Replication Works: The Central Event Log**
 
-Open Match achieves this state synchronization using Redis Streams as a central, ordered log for all ticket-related events.
+Open Match achieves this state synchronization using Redis Streams as a central, ordered log (`om-replication`) for all ticket-related events.
 
-1. **Writing to the Log**: When an Open Match instance receives an API call (e.g., `CreateTicket`), it writes a new event to the central Redis Stream.  
-2. **Reading from the Log**: Every Open Match instance, including the one that wrote the event, is constantly listening to this stream for new events.  
-3. **Applying Changes**: As events arrive from the stream, each instance applies the changes to its own local, in-memory ticket cache.
+1. **Writing to the Log (Outgoing Batch Packing and Stream Trimming)**:
+   * When an Open Match instance receives an API call (e.g., `CreateTicket`, `ActivateTickets`, `DeactivateTickets`), it queues the update in its outgoing replication queue (`OM_CACHE_OUT_QUEUE_BUFFER_SIZE`) and flushes updates to the central Redis Stream in pipelined batches (up to `OM_CACHE_OUT_MAX_QUEUE_THRESHOLD` updates or after waiting `OM_CACHE_OUT_WAIT_TIMEOUT_MS`).
+   * When `OM_CACHE_PACK_TICKET_STATE_UPDATES` is set to `true`, contiguous `ActivateTickets` or `DeactivateTickets` operations—including concurrent requests from multiple callers—are coalesced into packed multi-key stream entries (up to `OM_CACHE_OUT_MAX_PACKED_KEYS` keys per entry), dramatically reducing Redis stream write amplification during match bursts.
+   * Each outgoing write pipeline appends an approximate stream trim command (`XTRIM om-replication MINID ~ <threshold>`) to evict stream entries older than the configured ticket and assignment TTL window (`OM_CACHE_TICKET_TTL_MS` + `OM_CACHE_ASSIGNMENT_ADDITIONAL_TTL_MS`), bounding Redis memory consumption with low overhead.
+2. **Reading from the Log (Blocking Polls and Adaptive Poll Waits)**:
+   * Every Open Match instance, including the one that wrote the event, continuously polls the `om-replication` stream using blocking reads (`XREAD COUNT <OM_CACHE_IN_MAX_UPDATES_PER_POLL> BLOCK <OM_CACHE_IN_WAIT_TIMEOUT_MS>`).
+   * After a non-empty partial poll (returning fewer than `OM_CACHE_IN_MAX_UPDATES_PER_POLL` updates), the poller pauses for `OM_CACHE_IN_POLL_WAIT_MS` so trickling updates coalesce into larger batches. After a full poll (reaching `OM_CACHE_IN_MAX_UPDATES_PER_POLL`), it pauses for the shorter `OM_CACHE_IN_FULL_POLL_WAIT_MS` to rapidly drain large backlogs.
+3. **Applying Changes, Incremental Active Indexing, and Min-Heap TTL Expiration**:
+   * Polled updates are buffered in a local channel (`OM_CACHE_IN_QUEUE_BUFFER_SIZE`) and applied to the instance's in-memory `ReplicatedTicketCache` in bounded cycles of up to `OM_CACHE_IN_MAX_APPLY_DURATION_MS`. Between cycles, the applier sleeps for `OM_CACHE_IN_SLEEP_BETWEEN_APPLYING_UPDATES_MS` when the queue is drained, or yields for `OM_CACHE_IN_FULL_APPLY_SLEEP_MS` if the cycle hits `OM_CACHE_IN_MAX_APPLY_DURATION_MS` while updates remain queued.
+   * As events are applied, the cache incrementally maintains a materialized active-ticket index (`ActiveTickets`). When `InvokeMatchmakingFunctions` runs, `SnapshotActiveTickets` captures a lock-free snapshot of active tickets in time proportional only to the active ticket count—without scanning inactive tickets.
+   * Local TTL expiration runs asynchronously on a background ticker (`OM_CACHE_EXPIRATION_INTERVAL_MS`) using deadline-ordered min-heaps, evicting up to `OM_CACHE_EXPIRATION_MAX_DELETES_PER_CYCLE` expired tickets and assignments per cycle in small lock-bounded chunks rather than scanning the entire ticket map after every replication batch.
 
 This event-sourcing pattern provides two critical guarantees:
 
 * **Total Order**: Every instance receives and processes all events in the exact same order.  
 * **Durability**: The Redis stream acts as the durable source of truth for the system's state.
 
-To prevent an instance from being "ahead" of the global state, an instance that creates a ticket **will not add that ticket to its own local cache until it receives that same creation event back from the Redis stream**. This ensures all instances update their state based on the same public information.
+To prevent an instance from being "ahead" of the global state, an instance that creates a ticket **will not add that ticket to its own local cache until it receives that same creation event back from the Redis stream**. Cold-starting or newly scaled instances also enforce an initial startup catch-up barrier so `InvokeMatchmakingFunctions` waits until the existing stream backlog has been polled and applied before snapshotting active tickets. This ensures all instances update and query their state based on the same replicated event log.
 
 #### **What This Means for Your Matchmaker**
 

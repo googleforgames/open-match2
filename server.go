@@ -17,16 +17,20 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
-	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
+	"sync"
 	"syscall"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/stats"
 	"google.golang.org/grpc/status"
@@ -39,17 +43,47 @@ import (
 	gw "github.com/googleforgames/open-match2/v2/pkg/api"
 )
 
-// start brings up the gRPC server, based on the configuration.
-func start(cfg *viper.Viper) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+func unaryPanicRecoveryInterceptor(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp any, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			var fullMethod string
+			if info != nil {
+				fullMethod = info.FullMethod
+			}
+			logger.Errorf("Recovered from panic in unary gRPC handler %s: %v\n%s", fullMethod, r, string(debug.Stack()))
+			err = status.Error(codes.Internal, "internal server error")
+		}
+	}()
+	return handler(ctx, req)
+}
 
-	// Context cancellation by signal
-	signalChan := make(chan os.Signal, 1)
+func streamPanicRecoveryInterceptor(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			var fullMethod string
+			if info != nil {
+				fullMethod = info.FullMethod
+			}
+			logger.Errorf("Recovered from panic in stream gRPC handler %s: %v\n%s", fullMethod, r, string(debug.Stack()))
+			err = status.Error(codes.Internal, "internal server error")
+		}
+	}()
+	return handler(srv, ss)
+}
 
-	// SIGTERM is signaled by k8s when it wants a pod to stop.
+// start brings up the gRPC and HTTP gateway servers based on the configuration
+// and shuts them down gracefully when parentCtx is cancelled or a termination signal arrives.
+func start(parentCtx context.Context, cfg *viper.Viper) {
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+
+	// SIGTERM is signaled by k8s/Cloud Run when it wants an instance to stop.
 	// SIGINT is signaled when running locally and hitting Ctrl+C.
-	signal.Notify(signalChan, syscall.SIGTERM, syscall.SIGINT)
+	ctx, stop := signal.NotifyContext(parentCtx, syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
+	var wg sync.WaitGroup
 
 	// gRPC server startup
 	logger.Infof("Open Match Server starting unexposed gRPC server on port %v", cfg.GetString("OM_GRPC_PORT"))
@@ -58,12 +92,18 @@ func start(cfg *viper.Viper) {
 		logger.Fatalf("Couldn't listen on port %v - net.Listen error: %v", cfg.GetString("OM_GRPC_PORT"), err)
 	}
 	var opts []grpc.ServerOption
-	opts = append(opts, grpc.StatsHandler(&Handler{}))
+	opts = append(opts,
+		grpc.StatsHandler(&Handler{}),
+		grpc.UnaryInterceptor(unaryPanicRecoveryInterceptor),
+		grpc.StreamInterceptor(streamPanicRecoveryInterceptor),
+	)
 	omServer := grpc.NewServer(opts...)
 	pb.RegisterOpenMatchServiceServer(omServer, &grpcServer{})
+	wg.Add(1)
 	go func() {
-		if err = omServer.Serve(lis); err != nil {
-			logger.Fatal(err)
+		defer wg.Done()
+		if serveErr := omServer.Serve(lis); serveErr != nil && !errors.Is(serveErr, grpc.ErrServerStopped) {
+			logger.Fatal(serveErr)
 		}
 	}()
 	logger.Debugf("Open Match Core gRPC server with OTEL instrumentation started")
@@ -80,21 +120,44 @@ func start(cfg *viper.Viper) {
 	if err != nil {
 		logger.Fatal(err)
 	}
+	httpServer := &http.Server{
+		Addr:              ":" + cfg.GetString("PORT"),
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	wg.Add(1)
 	go func() {
-		// Turn off linting to stop "G114: Use of net/http serve function that
-		// has no support for setting timeouts". This linting exists to avoid
-		// attacks from malicious clients for servers on the internet, but the
-		// only supported OM deployment is to have om-core as a private service
-		// that can only be accessed by first-party clients, so it does not apply.
-		if err = http.ListenAndServe(":"+cfg.GetString("PORT"), mux); err != nil { //nolint:gosec
-			logger.Fatalf("Failed to start http server: %s", err)
+		defer wg.Done()
+		if httpErr := httpServer.ListenAndServe(); httpErr != nil && !errors.Is(httpErr, http.ErrServerClosed) {
+			logger.Fatalf("Failed to start http server: %s", httpErr)
 		}
 	}()
 	logger.Debugf("Open Match Core http server started")
 
-	// Server will wait here forever for a quit signal
-	<-signalChan
-	omServer.Stop()
+	// Wait for context cancellation or termination signal.
+	<-ctx.Done()
+	stop()
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+
+	if shutdownErr := httpServer.Shutdown(shutdownCtx); shutdownErr != nil {
+		logger.Warnf("HTTP server shutdown error: %v", shutdownErr)
+	}
+
+	grpcDone := make(chan struct{})
+	go func() {
+		omServer.GracefulStop()
+		close(grpcDone)
+	}()
+	select {
+	case <-grpcDone:
+	case <-shutdownCtx.Done():
+		omServer.Stop()
+		<-grpcDone
+	}
+
+	wg.Wait()
 }
 
 // Handler implements [stats.Handler](https://pkg.go.dev/google.golang.org/grpc/stats#Handler) interface.
@@ -158,7 +221,6 @@ func (st *Handler) HandleRPC(ctx context.Context, stat stats.RPCStats) {
 		if s.Error != nil {
 			exitStatus, _ := status.FromError(s.Error)
 			otelRpcErrors.Add(ctx, 1, rpcNameAttr, metric.WithAttributes(
-				attribute.String("error", s.Error.Error()),
 				attribute.String("grpc.status", exitStatus.Code().String()),
 			))
 		}

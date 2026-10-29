@@ -16,6 +16,7 @@ package filter
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -27,44 +28,77 @@ import (
 // from a pool based on that pool's filters (i.e. it validates the filter
 // works as expected).
 func TestMeetsCriteria(t *testing.T) {
-	// Check that when a ticket meets filter criteria, it is included.
-	testInclusion := func(t *testing.T, pool *pb.Pool, ticket *pb.Ticket) {
-		if !In(pool, ticket) {
-			t.Error("ticket should be included in the pool")
+	t.Run("Included", func(t *testing.T) {
+		for _, tc := range testcases.IncludedTestCases() {
+			t.Run(tc.Name, func(t *testing.T) {
+				if !In(tc.Pool, tc.Ticket) {
+					t.Error("ticket should be included in the pool")
+				}
+			})
 		}
-	}
+	})
 
-	for _, tc := range testcases.IncludedTestCases() {
-		tc := tc
-		t.Run(tc.Name, func(t *testing.T) {
-			testInclusion(t, tc.Pool, tc.Ticket)
-		})
-	}
-
-	// Check that when a ticket fails filter criteria, it is excluded.
-	testExclusion := func(t *testing.T, pool *pb.Pool, ticket *pb.Ticket) {
-		if In(pool, ticket) {
-			t.Error("ticket should be excluded from the pool")
+	t.Run("Excluded", func(t *testing.T) {
+		for _, tc := range testcases.ExcludedTestCases() {
+			t.Run(tc.Name, func(t *testing.T) {
+				if In(tc.Pool, tc.Ticket) {
+					t.Error("ticket should be excluded from the pool")
+				}
+			})
 		}
-	}
-
-	for _, tc := range testcases.ExcludedTestCases() {
-		tc := tc
-		t.Run(tc.Name, func(t *testing.T) {
-			testExclusion(t, tc.Pool, tc.Ticket)
-		})
-	}
+	})
 }
 
 // TestValidPoolFilter runs the pool filter validation function with known
-// invalid values to make sure the validation function correctly rejects them.
+// valid and invalid values to make sure the validation function behaves as expected.
 func TestValidPoolFilter(t *testing.T) {
+	now := time.Now().UTC()
 	type testcase struct {
 		name string
 		pool *pb.Pool
 		err  error
 	}
 	tcs := []testcase{
+		{
+			name: "valid pool without creation time filter",
+			pool: &pb.Pool{},
+			err:  nil,
+		},
+		{
+			name: "valid creation time filter with start and end",
+			pool: &pb.Pool{
+				CreationTimeRangeFilter: &pb.Pool_CreationTimeRangeFilter{
+					Start: timestamppb.New(now),
+					End:   timestamppb.New(now.Add(time.Hour)),
+				},
+			},
+			err: nil,
+		},
+		{
+			name: "valid creation time filter with start only",
+			pool: &pb.Pool{
+				CreationTimeRangeFilter: &pb.Pool_CreationTimeRangeFilter{
+					Start: timestamppb.New(now),
+				},
+			},
+			err: nil,
+		},
+		{
+			name: "valid creation time filter with end only",
+			pool: &pb.Pool{
+				CreationTimeRangeFilter: &pb.Pool_CreationTimeRangeFilter{
+					End: timestamppb.New(now),
+				},
+			},
+			err: nil,
+		},
+		{
+			name: "valid creation time filter with both start and end nil",
+			pool: &pb.Pool{
+				CreationTimeRangeFilter: &pb.Pool_CreationTimeRangeFilter{},
+			},
+			err: nil,
+		},
 		{
 			name: "invalid creation time filter start",
 			pool: &pb.Pool{
@@ -88,14 +122,14 @@ func TestValidPoolFilter(t *testing.T) {
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
 			ok, err := ValidatePoolFilters(tc.pool)
-
-			require.False(t, ok)
-			require.Error(t, err)
-
-			require.ErrorIs(t, err, tc.err)
-			//s := status.Convert(err)
-			//require.Equal(t, tc.code, s.Code())
-			//require.Equal(t, tc.msg, s.Message())
+			if tc.err != nil {
+				require.False(t, ok)
+				require.Error(t, err)
+				require.ErrorIs(t, err, tc.err)
+				return
+			}
+			require.True(t, ok)
+			require.NoError(t, err)
 		})
 	}
 }

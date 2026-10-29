@@ -32,7 +32,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/signal"
 	"regexp"
 	"strconv"
@@ -53,10 +52,10 @@ var (
 		"component":  "statestore",
 		"replicator": "redis",
 	})
-	NoTicketKeyErr  = errors.New("Missing ticket key")
-	NoTicketDataErr = errors.New("No ticket data")
-	NoAssignmentErr = errors.New("Missing assignment")
-	InvalidInputErr = errors.New("Invalid input")
+	NoTicketKeyErr  = store.NoTicketKeyErr
+	NoTicketDataErr = store.NoTicketDataErr
+	NoAssignmentErr = store.NoAssignmentErr
+	InvalidInputErr = store.InvalidInputErr
 )
 
 type redisReplicator struct {
@@ -65,6 +64,92 @@ type redisReplicator struct {
 	cfg             *viper.Viper
 	replId          string
 	replIdValidator *regexp.Regexp
+	ctx             context.Context
+	cancel          context.CancelFunc
+}
+
+// Close releases signal notification resources and closes both the read and write
+// connection pools. It is safe to call on a nil receiver and idempotent across calls.
+func (rr *redisReplicator) Close() error {
+	if rr == nil {
+		return nil
+	}
+	if rr.cancel != nil {
+		rr.cancel()
+	}
+	var rErr, wErr error
+	if rr.rConnPool != nil {
+		rErr = rr.rConnPool.Close()
+	}
+	if rr.wConnPool != nil {
+		wErr = rr.wConnPool.Close()
+	}
+	return errors.Join(rErr, wErr)
+}
+
+func resolveDialTimeouts(cfg *viper.Viper) (connectTimeout, readTimeout, writeTimeout time.Duration) {
+	fallback := 60 * time.Second
+	if cfg != nil {
+		if idle := cfg.GetDuration("OM_REDIS_POOL_IDLE_TIMEOUT"); idle > 0 {
+			fallback = idle
+		}
+	}
+
+	connectTimeout = fallback
+	readTimeout = fallback
+	writeTimeout = fallback
+	if cfg != nil {
+		if d := cfg.GetDuration("OM_REDIS_DIAL_CONNECT_TIMEOUT"); d > 0 {
+			connectTimeout = d
+		}
+		if d := cfg.GetDuration("OM_REDIS_DIAL_READ_TIMEOUT"); d > 0 {
+			readTimeout = d
+		}
+		if d := cfg.GetDuration("OM_REDIS_DIAL_WRITE_TIMEOUT"); d > 0 {
+			writeTimeout = d
+		}
+	}
+
+	var waitTimeoutMs int64
+	if cfg != nil {
+		waitTimeoutMs = cfg.GetInt64("OM_CACHE_IN_WAIT_TIMEOUT_MS")
+	}
+	if waitTimeoutMs < 0 {
+		waitTimeoutMs = 0
+	}
+	minReadTimeout := time.Duration(waitTimeoutMs)*time.Millisecond + time.Second
+	if readTimeout < minReadTimeout {
+		readTimeout = minReadTimeout
+	}
+
+	return connectTimeout, readTimeout, writeTimeout
+}
+
+func formatRedisCommandForLog(cmd string, args []interface{}) string {
+	if len(args) == 4 && args[2] == "ticket" {
+		val, _ := args[3].(string)
+		return fmt.Sprintf("%s %v %v ticket <%d bytes>", cmd, args[0], args[1], len(val))
+	}
+	trimmed := args
+	if len(trimmed) > 0 {
+		if s, ok := trimmed[len(trimmed)-1].(string); ok && s == "" {
+			trimmed = trimmed[:len(trimmed)-1]
+		}
+	}
+	if len(trimmed) > 8 {
+		return fmt.Sprintf("%s %s ...", cmd, strings.Trim(fmt.Sprint(trimmed[:8]), "[]"))
+	}
+	if len(trimmed) == 0 {
+		return cmd
+	}
+	return fmt.Sprintf("%s %s", cmd, strings.Trim(fmt.Sprint(trimmed), "[]"))
+}
+
+func formatUpdateForLog(u *store.StateUpdate) string {
+	if u == nil {
+		return "<nil>"
+	}
+	return u.String()
 }
 
 // errors returned by inline functions aren't seen by our code and we can't
@@ -75,9 +160,7 @@ type redisReplicator struct {
 //nolint:wrapcheck,cyclop
 func New(cfg *viper.Viper) (*redisReplicator, error) {
 	// Exit on signal
-	ctx, cancel := context.WithCancel(context.Background())
-	signalChan := make(chan os.Signal, 1)
-	signal.Notify(signalChan, syscall.SIGTERM, syscall.SIGINT)
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 
 	var err error
 
@@ -126,6 +209,8 @@ func New(cfg *viper.Viper) (*redisReplicator, error) {
 		"write_redis_url": writeRedisUrl,
 	})
 
+	connectTimeout, readTimeout, writeTimeout := resolveDialTimeouts(cfg)
+
 	rr := &redisReplicator{
 		// replIdValidator is a regular expression that can be used to match
 		// replication id strings, which are redis stream entry ids.
@@ -133,6 +218,8 @@ func New(cfg *viper.Viper) (*redisReplicator, error) {
 		replIdValidator: regexp.MustCompile(`^\d{13}-\d+$`),
 		replId:          initialReplId,
 		cfg:             cfg,
+		ctx:             ctx,
+		cancel:          cancel,
 		rConnPool: &redis.Pool{ // Redis read pool
 			MaxIdle:     cfg.GetInt("OM_REDIS_POOL_MAX_IDLE"),
 			MaxActive:   cfg.GetInt("OM_REDIS_POOL_MAX_ACTIVE"),
@@ -163,55 +250,43 @@ func New(cfg *viper.Viper) (*redisReplicator, error) {
 				var conn redis.Conn
 				err := backoff.RetryNotify(
 					func() error { // Operation that the backoff module will retry
-
-						// Local closure var
-						var err error
-
-						select {
-						// Check to see if an SIGTERM or SIGINT were received
-						// before executing the dial - if they were, cancel the
-						// context to end the backoff retries.
-						case <-signalChan:
-							cancel()
-						default:
-							// 'conn' here refers to the variable in the enclosing
-							// redis.Pool{Dial: func() (redis.Conn, error)}
-							// scope, which is returned when the dial was successful.
-							// 'err' is the local variable, which
-							// backoff.RetryNotify() evaluates to determine if it
-							// needs to retry this operation.
-							rConnLogger.Debug("dialing Redis read replica")
-
-							// Dial options
-							dialOptions := []redis.DialOption{
-								redis.DialUsername(cfg.GetString("OM_REDIS_READ_USER")),
-								redis.DialPassword(cfg.GetString("OM_REDIS_READ_PASSWORD")),
-								redis.DialConnectTimeout(cfg.GetDuration("OM_REDIS_POOL_IDLE_TIMEOUT")),
-								redis.DialReadTimeout(cfg.GetDuration("OM_REDIS_POOL_IDLE_TIMEOUT")),
-							}
-
-							// Add option to use TLS if config flag is set
-							if cfg.GetBool("OM_REDIS_USE_TLS") {
-								rConnLogger.Info("OM_REDIS_USE_TLS is set to true, will attempt to connect to Redis read replica(s) using TLS.")
-								dialOptions = append(dialOptions, redis.DialUseTLS(true))
-							}
-
-							// Skip TLS cert verification if config flag is set
-							// (e.g., for self-signed certs)
-							if cfg.GetBool("OM_REDIS_TLS_SKIP_VERIFY") {
-								rConnLogger.Info("OM_REDIS_TLS_SKIP_VERIFY is set to true, will attempt to connect to Redis read replica(s) using TLS without verifying the TLS certificate.")
-								dialOptions = append(dialOptions, redis.DialTLSSkipVerify(true))
-							}
-
-							conn, err = redis.Dial("tcp",
-								readRedisUrl,
-								dialOptions...,
-							)
-							if err != nil { // Check for error on dial
-								rConnLogger.Error("failure dialing Redis read replica")
-							}
-
+						if ctx.Err() != nil {
+							return backoff.Permanent(ctx.Err())
 						}
+
+						var err error
+						rConnLogger.Debug("dialing Redis read replica")
+
+						// Dial options
+						dialOptions := []redis.DialOption{
+							redis.DialUsername(cfg.GetString("OM_REDIS_READ_USER")),
+							redis.DialPassword(cfg.GetString("OM_REDIS_READ_PASSWORD")),
+							redis.DialConnectTimeout(connectTimeout),
+							redis.DialReadTimeout(readTimeout),
+							redis.DialWriteTimeout(writeTimeout),
+						}
+
+						// Add option to use TLS if config flag is set
+						if cfg.GetBool("OM_REDIS_USE_TLS") {
+							rConnLogger.Info("OM_REDIS_USE_TLS is set to true, will attempt to connect to Redis read replica(s) using TLS.")
+							dialOptions = append(dialOptions, redis.DialUseTLS(true))
+						}
+
+						// Skip TLS cert verification if config flag is set
+						// (e.g., for self-signed certs)
+						if cfg.GetBool("OM_REDIS_TLS_SKIP_VERIFY") {
+							rConnLogger.Info("OM_REDIS_TLS_SKIP_VERIFY is set to true, will attempt to connect to Redis read replica(s) using TLS without verifying the TLS certificate.")
+							dialOptions = append(dialOptions, redis.DialTLSSkipVerify(true))
+						}
+
+						conn, err = redis.Dial("tcp",
+							readRedisUrl,
+							dialOptions...,
+						)
+						if err != nil { // Check for error on dial
+							rConnLogger.Error("failure dialing Redis read replica")
+						}
+
 						return err
 					},
 					backoff.WithContext(backoff.NewExponentialBackOff(backoff.WithMaxElapsedTime(
@@ -245,56 +320,44 @@ func New(cfg *viper.Viper) (*redisReplicator, error) {
 				var conn redis.Conn
 				err := backoff.RetryNotify(
 					func() error { // Operation that the backoff module will retry
-
-						select {
-						// Check to see if an SIGTERM or SIGINT were received
-						// before executing the dial - if they were, cancel the
-						// context to end the backoff retries.
-						case <-signalChan:
-							cancel()
-						default:
-							// Local closure var
-							var err error
-
-							// 'conn' here refers to the variable in the enclosing
-							// redis.Pool{Dial: func() (redis.Conn, error)}
-							// scope, which is returned when the dial was successful.
-							// 'err' is the local variable, which
-							// backoff.RetryNotify() evaluates to determine if it
-							// needs to retry this operation.
-							wConnLogger.Debug("dialing Redis write instance")
-
-							// Dial options
-							dialOptions := []redis.DialOption{
-								redis.DialUsername(cfg.GetString("OM_REDIS_WRITE_USER")),
-								redis.DialPassword(cfg.GetString("OM_REDIS_WRITE_PASSWORD")),
-								redis.DialConnectTimeout(cfg.GetDuration("OM_REDIS_POOL_IDLE_TIMEOUT")),
-								redis.DialReadTimeout(cfg.GetDuration("OM_REDIS_POOL_IDLE_TIMEOUT")),
-							}
-
-							// Add option to use TLS if config flag is set
-							if cfg.GetBool("OM_REDIS_USE_TLS") {
-								wConnLogger.Info("OM_REDIS_USE_TLS is set to true, will attempt to connect to Redis write instance using TLS.")
-								dialOptions = append(dialOptions, redis.DialUseTLS(true))
-							}
-
-							// Skip TLS cert verification if config flag is set
-							// (e.g., for self-signed certs)
-							if cfg.GetBool("OM_REDIS_TLS_SKIP_VERIFY") {
-								wConnLogger.Info("OM_REDIS_TLS_SKIP_VERIFY is set to true, will attempt to connect to Redis write instance using TLS without verifying the TLS certificate.")
-								dialOptions = append(dialOptions, redis.DialTLSSkipVerify(true))
-							}
-
-							conn, err = redis.Dial("tcp",
-								writeRedisUrl,
-								dialOptions...,
-							)
-
-							if err != nil { // Check for error on dial
-								wConnLogger.Error("failure dialing Redis write instance")
-							}
-
+						if ctx.Err() != nil {
+							return backoff.Permanent(ctx.Err())
 						}
+
+						var err error
+						wConnLogger.Debug("dialing Redis write instance")
+
+						// Dial options
+						dialOptions := []redis.DialOption{
+							redis.DialUsername(cfg.GetString("OM_REDIS_WRITE_USER")),
+							redis.DialPassword(cfg.GetString("OM_REDIS_WRITE_PASSWORD")),
+							redis.DialConnectTimeout(connectTimeout),
+							redis.DialReadTimeout(readTimeout),
+							redis.DialWriteTimeout(writeTimeout),
+						}
+
+						// Add option to use TLS if config flag is set
+						if cfg.GetBool("OM_REDIS_USE_TLS") {
+							wConnLogger.Info("OM_REDIS_USE_TLS is set to true, will attempt to connect to Redis write instance using TLS.")
+							dialOptions = append(dialOptions, redis.DialUseTLS(true))
+						}
+
+						// Skip TLS cert verification if config flag is set
+						// (e.g., for self-signed certs)
+						if cfg.GetBool("OM_REDIS_TLS_SKIP_VERIFY") {
+							wConnLogger.Info("OM_REDIS_TLS_SKIP_VERIFY is set to true, will attempt to connect to Redis write instance using TLS without verifying the TLS certificate.")
+							dialOptions = append(dialOptions, redis.DialTLSSkipVerify(true))
+						}
+
+						conn, err = redis.Dial("tcp",
+							writeRedisUrl,
+							dialOptions...,
+						)
+
+						if err != nil { // Check for error on dial
+							wConnLogger.Error("failure dialing Redis write instance")
+						}
+
 						return err
 					},
 					backoff.WithContext(backoff.NewExponentialBackOff(backoff.WithMaxElapsedTime(
@@ -311,7 +374,7 @@ func New(cfg *viper.Viper) (*redisReplicator, error) {
 
 	// attempt to access Redis hosts during initialization in an effort to fail quickly
 	rConnLogger.Debug("testing read redis connection")
-	rConn, err := rr.rConnPool.GetContext(context.Background())
+	rConn, err := rr.rConnPool.GetContext(ctx)
 	if err == nil {
 		// https://github.com/gomodule/redigo/blob/247f6c0e0a0ea200f727a5280d0d55f6bce6d2e7/redis/pool.go#L204
 		// "If the function completes without error, then the application must
@@ -321,10 +384,11 @@ func New(cfg *viper.Viper) (*redisReplicator, error) {
 		rConnLogger.WithFields(logrus.Fields{
 			"error": err,
 		}).Debug("read redis connection error")
+		_ = rr.Close()
 		return nil, err
 	}
 	wConnLogger.Debug("testing write redis connection")
-	wConn, err := rr.wConnPool.GetContext(context.Background())
+	wConn, err := rr.wConnPool.GetContext(ctx)
 	if err == nil {
 		// https://github.com/gomodule/redigo/blob/247f6c0e0a0ea200f727a5280d0d55f6bce6d2e7/redis/pool.go#L204
 		// "If the function completes without error, then the application must
@@ -334,12 +398,14 @@ func New(cfg *viper.Viper) (*redisReplicator, error) {
 		wConnLogger.WithFields(logrus.Fields{
 			"error": err,
 		}).Debug("write redis connection error")
+		_ = rr.Close()
 		return nil, err
 	}
 
 	// Check if the context has been cancelled by SIGINT or SIGTERM.
 	if ctx.Err() != nil {
-		rConnLogger.Fatal("cancellation requested")
+		_ = rr.Close()
+		rConnLogger.Error("cancellation requested")
 		return nil, ctx.Err()
 	}
 
@@ -350,8 +416,8 @@ func New(cfg *viper.Viper) (*redisReplicator, error) {
 // replicated to all clients (e.g. other instances of om-core).
 // When using redis, these will be pipelined together as a batch update to improve performance.
 // In addition to the updates sent to the function, it always ends every batch with an XTRIM
-// command to delete all updates older than the ttl configured in the environment variable
-// OM_CACHE_TICKET_TTL_MS.
+// command to delete all updates older than the ttl configured in the environment variables
+// OM_CACHE_TICKET_TTL_MS and OM_CACHE_ASSIGNMENT_ADDITIONAL_TTL_MS.
 //
 //nolint:gocognit,cyclop
 func (rr *redisReplicator) SendUpdates(updates []*store.StateUpdate) []*store.StateResponse {
@@ -369,82 +435,113 @@ func (rr *redisReplicator) SendUpdates(updates []*store.StateUpdate) []*store.St
 	rConn := rr.wConnPool.Get()
 	defer rConn.Close()
 
-	// Process all the requested redis commands
+	sentCount := 0
+
+	// Process all the requested redis commands.
 	// If a command cannot be constructed because the update is invalid, add an
 	// error to the output for that update.
 	for i, update := range updates {
 		out[i] = &store.StateResponse{Result: "", Err: nil}
-		redisArgs := make([]interface{}, 0)
+		if update == nil {
+			out[i].Err = InvalidInputErr
+			continue
+		}
+
+		redisArgs := make([]interface{}, 0, 4)
 		redisArgs = append(redisArgs, "om-replication", "*")
 		switch update.Cmd {
 		case store.Ticket:
 			// Validate input
 			if update.Value == "" {
+				out[i].Result = update.PrimaryKey()
 				out[i].Err = NoTicketDataErr
 				continue
 			}
-			redisArgs = append(redisArgs, "ticket")
-			redisArgs = append(redisArgs, update.Value)
-		case store.Activate:
-			// Validate input
-			if update.Key == "" {
-				out[i].Err = NoTicketKeyErr
-				continue
+			redisArgs = append(redisArgs, "ticket", update.Value)
+		case store.Activate, store.Deactivate:
+			cmdToken := "activate"
+			if update.Cmd == store.Deactivate {
+				cmdToken = "deactivate"
 			}
-			redisArgs = append(redisArgs, "activate")
-			redisArgs = append(redisArgs, update.Key)
-		case store.Deactivate:
-			// Validate input
-			if update.Key == "" {
-				out[i].Err = NoTicketKeyErr
-				continue
+			if len(update.Keys) > 0 {
+				validKeys := make([]string, 0, len(update.Keys))
+				for _, k := range update.Keys {
+					if k == "" {
+						logger.Warnf("skipping empty ticket key in packed update: %s", formatUpdateForLog(update))
+						continue
+					}
+					validKeys = append(validKeys, k)
+				}
+				if len(validKeys) == 0 {
+					out[i].Result = update.PrimaryKey()
+					out[i].Err = NoTicketKeyErr
+					continue
+				}
+				redisArgs = append(redisArgs, cmdToken)
+				for _, k := range validKeys {
+					redisArgs = append(redisArgs, k)
+				}
+				if len(redisArgs)%2 != 0 {
+					redisArgs = append(redisArgs, "")
+				}
+			} else {
+				if update.Key == "" {
+					out[i].Result = update.PrimaryKey()
+					out[i].Err = NoTicketKeyErr
+					continue
+				}
+				redisArgs = append(redisArgs, cmdToken, update.Key)
 			}
-			redisArgs = append(redisArgs, "deactivate")
-			redisArgs = append(redisArgs, update.Key)
 		case store.Assign:
-			// TODO: decide if we want multiple assignments in one redis record
-			// Right now, each entry in the Redis stream only holds one
-			// assignment. It is possible to put multiple assignments in a
-			// single entry (it is an arbitrary number of key/value pairs), but
-			// since assignments are deprecated we're punting this optimization
-			// in order to focus on other things.
-			//
 			// Validate input
 			if update.Key == "" {
+				out[i].Result = update.PrimaryKey()
 				out[i].Err = NoTicketKeyErr
 				continue
 			}
 			if update.Value == "" {
+				out[i].Result = update.PrimaryKey()
 				out[i].Err = NoAssignmentErr
 				continue
 			}
-			redisArgs = append(redisArgs, "assign")
-			redisArgs = append(redisArgs, update.Key)
-			redisArgs = append(redisArgs, "connection")
-			redisArgs = append(redisArgs, update.Value)
+			redisArgs = append(redisArgs, "assign", update.Key, "connection", update.Value)
 		default:
 			// Something has gone seriously wrong
+			out[i].Result = update.PrimaryKey()
 			out[i].Err = InvalidInputErr
 			continue
 		}
 
 		// The update was validated and the redis command successfully constructed.
 		// Send command to redis.
-		redisCmdWithArgs := fmt.Sprintf("%v %v", redisCmd, strings.Trim(fmt.Sprint(redisArgs), "[]"))
-		logger.Debug(redisCmdWithArgs)
+		if logger.Logger.IsLevelEnabled(logrus.TraceLevel) {
+			logger.Trace(formatRedisCommandForLog(redisCmd, redisArgs))
+		}
 		err = rConn.Send(redisCmd, redisArgs...)
 		if err != nil {
 			logger.WithFields(logrus.Fields{
-				"redis_command": redisCmdWithArgs,
+				"redis_command": formatRedisCommandForLog(redisCmd, redisArgs),
 			}).Errorf("Redis error: %v", err)
 		}
+		sentCount++
+	}
+
+	if sentCount == 0 {
+		return out
 	}
 
 	// Append one additional command to the pipeline to remove expired entries.
-	expirationThresh := strconv.FormatInt(time.Now().UnixMilli()-rr.cfg.GetInt64("OM_CACHE_TICKET_TTL_MS"), 10)
-	redisCmdWithArgs := fmt.Sprintf("XTRIM om-replication MINID %v", expirationThresh)
-	logger.Debug(redisCmdWithArgs)
-	err = rConn.Send("XTRIM", "om-replication", "MINID", expirationThresh)
+	expirationThresh := strconv.FormatInt(
+		time.Now().UnixMilli()-
+			rr.cfg.GetInt64("OM_CACHE_TICKET_TTL_MS")-
+			rr.cfg.GetInt64("OM_CACHE_ASSIGNMENT_ADDITIONAL_TTL_MS"),
+		10,
+	)
+	redisCmdWithArgs := fmt.Sprintf("XTRIM om-replication MINID ~ %v", expirationThresh)
+	if logger.Logger.IsLevelEnabled(logrus.TraceLevel) {
+		logger.Trace(redisCmdWithArgs)
+	}
+	err = rConn.Send("XTRIM", "om-replication", "MINID", "~", expirationThresh)
 	if err != nil {
 		logger.WithFields(logrus.Fields{
 			"redis_command": redisCmdWithArgs,
@@ -457,17 +554,41 @@ func (rr *redisReplicator) SendUpdates(updates []*store.StateUpdate) []*store.St
 		logger.Errorf("Redis error when executing batch: %v", err)
 	}
 
-	// Make sure we have results before we parse them.
-	if r == nil {
-		logger.Error("Redis returned empty results from update!")
+	replies, ok := r.([]interface{})
+	if err != nil || r == nil || !ok {
+		if r == nil {
+			logger.Error("Redis returned empty results from update!")
+		}
+		batchErr := err
+		if batchErr == nil {
+			batchErr = errors.New("empty or invalid Redis batch response")
+		}
+		for i, update := range updates {
+			if out[i].Result == "" && update != nil {
+				out[i].Result = update.PrimaryKey()
+			}
+			if out[i].Err == nil {
+				out[i].Err = batchErr
+			}
+		}
+		return out
+	}
+
+	if len(replies) == 0 {
+		for i, update := range updates {
+			if out[i].Err == nil {
+				out[i].Result = update.PrimaryKey()
+				out[i].Err = errors.New("missing Redis response for update")
+			}
+		}
 		return out
 	}
 
 	// The last result from Redis is a count of number of entries we removed with the XTRIM command.
 	// Can be useful when debugging, so log it.
-	expiredCount, err := redis.Int64(r.([]interface{})[len(r.([]interface{}))-1], err)
-	if err != nil {
-		logger.Errorf("Redis output int64 conversion error: %v", err)
+	expiredCount, trimErr := redis.Int64(replies[len(replies)-1], err)
+	if trimErr != nil {
+		logger.Errorf("Redis output int64 conversion error: %v", trimErr)
 	}
 	if expiredCount > 0 {
 		logger.WithFields(logrus.Fields{
@@ -477,51 +598,75 @@ func (rr *redisReplicator) SendUpdates(updates []*store.StateUpdate) []*store.St
 	}
 
 	// Process all other Redis results into the return output array.
-	for index := 0; index < len(r.([]interface{}))-1; index++ {
-
-		// First, make sure the update parsing didn't find any issues.  If
+	replyIdx := 0
+	for index := 0; index < len(updates); index++ {
+		// First, make sure the update parsing didn't find any issues. If
 		// parsing the update generated an error, then the update didn't
 		// have all the required fields so it was never sent to Redis.
 		if out[index].Err != nil {
 			logger.WithFields(logrus.Fields{
-				"update": updates[index],
+				"update": formatUpdateForLog(updates[index]),
 			}).Error("an update could not be parsed and was skipped")
 
-			// There is no Redis result to return, so return the update parsing error
-			// and the key that generated the error.
-			out[index].Result = updates[index].Key
-
-		} else {
-			// The update was valid and sent to Redis. Try to convert the
-			// Redis response to a string.
-			t, err := redis.String(r.([]interface{})[index], err)
-			if err != nil {
-				// Error, the redis result isn't a string (meaning it caused some issue).
-				// Return the error code, and the result is the key that generated the error.
-				t = updates[index].Key
-				out[index].Err = fmt.Errorf("Redis output string conversion error: %w", err)
-				logger.WithFields(logrus.Fields{
-					"err":    err,
-					"update": updates[index],
-				}).Error("Redis returned an error while trying to update")
+			if out[index].Result == "" && updates[index] != nil {
+				out[index].Result = updates[index].PrimaryKey()
 			}
+			continue
+		}
 
-			// Successful result.
+		if replyIdx >= len(replies)-1 {
+			out[index].Result = updates[index].PrimaryKey()
+			out[index].Err = errors.New("missing Redis response for update")
+			continue
+		}
+
+		// The update was valid and sent to Redis. Try to convert the
+		// Redis response to a string.
+		t, convErr := redis.String(replies[replyIdx], err)
+		replyIdx++
+		if convErr != nil {
+			// Error, the redis result isn't a string (meaning it caused some issue).
+			// Return the error code, and the result is the key that generated the error.
+			t = updates[index].PrimaryKey()
+			out[index].Err = fmt.Errorf("Redis output string conversion error: %w", convErr)
 			logger.WithFields(logrus.Fields{
-				"update": updates[index],
+				"err":    convErr,
+				"update": formatUpdateForLog(updates[index]),
+			}).Error("Redis returned an error while trying to update")
+		}
+
+		// Successful result.
+		if logger.Logger.IsLevelEnabled(logrus.TraceLevel) {
+			logger.WithFields(logrus.Fields{
+				"update": formatUpdateForLog(updates[index]),
 				"result": t,
 			}).Tracef("Redis successfully processed update")
-			out[index].Result = t
 		}
+		out[index].Result = t
 	}
 
 	return out
 }
 
+func unpackStreamKeys(fieldTokens []string) []string {
+	if len(fieldTokens) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(fieldTokens))
+	keys = append(keys, fieldTokens[0])
+	if len(fieldTokens) > 1 {
+		keys = append(keys, fieldTokens[1:]...)
+	}
+	if len(keys) > 1 && keys[len(keys)-1] == "" {
+		keys = keys[:len(keys)-1]
+	}
+	return keys
+}
+
 // getUpdates performs a blocking read on state (with a configurable timeout read from
 // the environment variable OM_CACHE_IN_WAIT_TIMEOUT_MS) to receive
 // all update structs that have been sent to the replicator since the last getUpdates request.
-// They are returned in an array, and om-core is applies them
+// They are returned in an array, and om-core applies them
 // as events in the order they were originally received.
 //
 //nolint:cyclop
@@ -536,7 +681,7 @@ func (rr *redisReplicator) GetUpdates() []*store.StateUpdate {
 
 	// Generate redis command to retrieve updates
 	redisCmd := "XREAD"
-	redisArgs := make([]interface{}, 0)
+	redisArgs := make([]interface{}, 0, 7)
 	// Max num of updates to get in one go
 	redisArgs = append(redisArgs, "COUNT", rr.cfg.GetString("OM_CACHE_IN_MAX_UPDATES_PER_POLL"))
 	// Timeout when waiting for stream updates (GetUpdates is run
@@ -552,9 +697,11 @@ func (rr *redisReplicator) GetUpdates() []*store.StateUpdate {
 	defer rConn.Close()
 
 	// Execute XREAD
-	logger.WithFields(logrus.Fields{
-		"redisCmd": fmt.Sprint(redisCmd, strings.Trim(fmt.Sprint(redisArgs), "[]")),
-	}).Debugf("Executing redis command")
+	if logger.Logger.IsLevelEnabled(logrus.DebugLevel) {
+		logger.WithFields(logrus.Fields{
+			"redisCmd": fmt.Sprint(redisCmd, strings.Trim(fmt.Sprint(redisArgs), "[]")),
+		}).Debugf("Executing redis command")
+	}
 	data, err := rConn.Do(redisCmd, redisArgs...)
 	if err != nil {
 		logger.Errorf("Redis error: %v", err)
@@ -563,28 +710,47 @@ func (rr *redisReplicator) GetUpdates() []*store.StateUpdate {
 	// Redigo module returns nil for the data if it reaches the timeout (BLOCK
 	// Xms) without seeing any updates. In that case, just return gracefully.
 	if data != nil {
-		switch data.(type) {
+		switch typedData := data.(type) {
 		case redis.Error:
-			logger.Errorf("Redis error: %v", data.(redis.Error))
+			logger.Errorf("Redis error: %v", typedData)
 		case []interface{}:
+			if len(typedData) == 0 {
+				return out
+			}
+			streamEntry, ok := typedData[0].([]interface{})
+			if !ok || len(streamEntry) < 2 {
+				return out
+			}
 			// the data is down a couple of nested array levels in the response:
 			// https://redis.io/docs/latest/develop/data-types/streams/#listening-for-new-items-with-xread
-			replStream := data.([]interface{})[0].([]interface{})[1].([]interface{})
+			replStream, ok := streamEntry[1].([]interface{})
+			if !ok {
+				return out
+			}
 			for _, v := range replStream {
-				// Element 0 is the redis stream entry ID, which we use as the replication ID.
-				replId, err := redis.String(v.([]interface{})[0], nil)
-				if err != nil {
-					logger.Error(err)
+				entryPair, ok := v.([]interface{})
+				if !ok || len(entryPair) < 2 {
+					logger.Errorf("Malformed Redis stream entry: %v", v)
+					continue
 				}
-				thisUpdate := &store.StateUpdate{}
+
+				// Element 0 is the redis stream entry ID, which we use as the replication ID.
+				replId, err := redis.String(entryPair[0], nil)
+				if err != nil || replId == "" {
+					logger.Errorf("Invalid Redis stream entry ID: %v", err)
+					continue
+				}
 
 				// Element 1 is the actual data in the stream entry.
-				// Our implementation assumes only one update is stored at each
-				// stream entry (Redis allows multiple, but our implementation
-				// does not)
-				y, err := redis.Strings(v.([]interface{})[1], nil)
-				if err != nil {
-					logger.Error(err)
+				y, err := redis.Strings(entryPair[1], nil)
+				if err != nil || len(y) < 2 {
+					logger.Errorf("Malformed Redis stream entry fields for ID %s: %v", replId, err)
+					rr.replId = replId
+					continue
+				}
+
+				thisUpdate := &store.StateUpdate{
+					ReplId: replId,
 				}
 
 				// Update type/key/value data
@@ -595,14 +761,37 @@ func (rr *redisReplicator) GetUpdates() []*store.StateUpdate {
 					thisUpdate.Value = y[1] // Only argument for a ticket is the ticket PB
 				case "activate":
 					thisUpdate.Cmd = store.Activate
-					thisUpdate.Key = y[1] // Only argument for a ticket activation is the ticket's ID
+					keys := unpackStreamKeys(y[1:])
+					thisUpdate.Key = keys[0]
+					if len(keys) > 1 {
+						thisUpdate.Keys = keys
+					}
 				case "deactivate":
 					thisUpdate.Cmd = store.Deactivate
-					thisUpdate.Key = y[1] // Only argument for a ticket deactivation is the ticket's ID
+					keys := unpackStreamKeys(y[1:])
+					thisUpdate.Key = keys[0]
+					if len(keys) > 1 {
+						thisUpdate.Keys = keys
+					}
 				case "assign":
+					if len(y) < 4 {
+						logger.Errorf("Malformed Redis assign entry %s: expected at least 4 field tokens, got %d", replId, len(y))
+						rr.replId = replId
+						continue
+					}
 					thisUpdate.Cmd = store.Assign
 					thisUpdate.Key = y[1]   // ticket's ID
 					thisUpdate.Value = y[3] // assignment
+				default:
+					logger.Errorf("Unknown Redis replication command %q in entry %s", y[0], replId)
+					rr.replId = replId
+					continue
+				}
+
+				if logger.Logger.IsLevelEnabled(logrus.TraceLevel) {
+					logger.WithFields(logrus.Fields{
+						"update": formatUpdateForLog(thisUpdate),
+					}).Trace("Decoded Redis stream update")
 				}
 
 				// Populated all the fields without an error

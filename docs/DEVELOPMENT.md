@@ -11,17 +11,19 @@ Our target development environment is the default Cloud Shell you get by clickin
 
 The Open Match maintainers build `core` [remotely using Cloud Build on Google Cloud](https://cloud.google.com/docs/buildpacks/build-application#remote_builds).  A typical build goes something like this, with the repo cloned,  `gcloud` initialized, and an existing [Docker Artifact Registry](https://cloud.google.com/artifact-registry/docs/docker/store-docker-container-images) called `open-match`:
 ```
-# Update the dependencies to the latest versions and kick off a Cloud Build
-go get -u && go mod tidy && gcloud builds submit --async --pack \
+# Upgrade direct dependencies only, tidy modules, run static analysis and race-enabled tests, and kick off a Cloud Build
+go get $(go list -m -f '{{if not (or .Main .Indirect)}}{{.Path}}@latest{{end}}' all) && \
+go mod tidy && go vet ./... && OM_SKIP_REDIS_TESTS=true go test -race ./... && \
+gcloud builds submit --async --pack \
 image=$(gcloud config get artifacts/location)-docker.pkg.dev/$(gcloud config get project)/open-match/om-core
 ```
-There is no `cloudbuild.yaml` or `Dockerfile` required for this. [Google Cloud's buildpacks](https://cloud.google.com/docs/buildpacks/overview) takes care of everything.
+There is no `cloudbuild.yaml` or `Dockerfile` required for a pack build. [Google Cloud's buildpacks](https://cloud.google.com/docs/buildpacks/overview) takes care of everything.
 
 ### For Maintainers
 
-The following represent best practices but not required when doing a new release:
+The following represent best practices when doing a new release:
 
-* Go to [cloud.google.com](cloud.google.com) and open a clean Cloud Shell terminal. Run `go version` to find the version offered by default in Cloud Shell. Then kick off a Cloud Build using pack (as in the command above) and find the lines that specify the default version of Golang being used there.  You should see lines similar to this in the build logs:
+* Go to [cloud.google.com](https://cloud.google.com/) and open a clean Cloud Shell terminal. Run `go version` to find the version offered by default in Cloud Shell. Then kick off a Cloud Build using pack (as in the command above) and find the lines that specify the default version of Golang being used there.  You should see lines similar to this in the build logs:
 ```
 Step #1: ===> BUILDING
 Step #1: [builder] target distro name/version labels not found, reading /etc/os-release file
@@ -32,21 +34,21 @@ Step #1: [builder] ***** CACHE MISS: "go"
 Step #1: [builder] Installing Go v1.24.6.
 ``` 
 use the lower of these two versions in the `go.mod` files in Open Match 2 related projects (`go mod edit -go=<VERSION>`). This is to ensure that users following the instructions to build in their own projects can do their own builds using the default Cloud Shell environment and the latest Google Cloud buildpacks.
-* After verifying that the build works with the latest dependencies, commit any changes to `go.mod` to the repo. 
+* When upgrading dependencies, upgrade **direct dependencies only** (avoiding a blanket `go get -u ./...` across indirect dependencies), and then run `go mod tidy`, `go vet ./...`, and `go test -race ./...` to verify that everything builds and passes cleanly before committing changes to `go.mod` and `go.sum`.
 
 ## Deploy
-The `deploy` directory contains sample `service.yaml` and `cloudbuild.yaml` files, either of which you can edit to deploy an `om-core` service to Cloud Run in Google Cloud.  Typically the `service.yaml` is easier to adapt to manually deploying via command line, and `cloudbuild.yaml` is easier to adapt to a continuous build system, although feel free to use them as you see fit.
+The `deploy/cloud_run` directory contains sample `deploy/cloud_run/service.yaml` and `deploy/cloud_run/cloudbuild.yaml` files, either of which you can edit to deploy an `om-core` service to Cloud Run in Google Cloud. Typically `deploy/cloud_run/service.yaml` is easier to adapt to manually deploying via command line, and `deploy/cloud_run/cloudbuild.yaml` is easier to adapt to a continuous build system, although feel free to use them as you see fit.
 
 You should populate the following:
 * Your [VPC network](https://cloud.google.com/vpc/docs/overview).  Unless your company has turned on the `constraints/compute.skipDefaultNetworkCreation` org policy, your Google Cloud project will have a VPC created already, named `default`.
-* Your Service Account created for `om-core`. The `deploy/cloudrun-sa.iam` file lists all the roles the service account will need. 
+* Your Service Account created for `om-core`. The `deploy/cloud_run/cloudrun-sa.iam` file lists all the roles the service account will need. 
 * Your Redis instance IP address(es, OM supports configuring reads and writes to go to a master/replica respectively if you wish) that can be reached from Cloud Run. We test against Cloud Memorystore for Redis using the configuration detailed in [this guide](https://cloud.google.com/memorystore/docs/redis/connect-redis-instance-cloud-run).
 
-With the `service.yaml` file populated with everything you've configured, you can deploy the service with a command like this:
+With the `deploy/cloud_run/service.yaml` file populated with everything you've configured, you can deploy the service with a command like this:
 ```
-gcloud run services replace service.yaml
+gcloud run services replace deploy/cloud_run/service.yaml
 ```
-If you instead intend to use the `cloudbuild.yaml` file populated with everything you've configured, you can deploy the service with a command like the one listed in the comment at the top of the file (requires you to have enabled Cloud Build and have appropriate service account permissions):
+If you instead intend to use the `deploy/cloud_run/cloudbuild.yaml` file populated with everything you've configured, you can deploy the service with a command like the one listed in the comment at the top of `deploy/cloud_run/cloudbuild.yaml` (requires you to have enabled Cloud Build and have appropriate service account permissions):
 
 You may need to adjust the scaling configuration and amount of memory `om-core` is allowed to use depending on your matchmaker.
 
@@ -55,9 +57,29 @@ You may need to adjust the scaling configuration and amount of memory `om-core` 
 ## Protocol Buffers
 The `proto` directory contains the protocol buffer definition files and documentation about using and building them. If you're developing against Open Match, you probably want to write your Matchmaking Functions ('MMFs') in a language you're comfortable in, so you'll want to use `protoc` to generate libraries in your preferred language.
 
-## Testing
-You can run the golang unit tests using `go test ./...` from the `core` directory. 
+## Testing and Benchmarks
+You can run the full Go unit test suite (with the race detector enabled) from the repository root:
+```
+go test -race ./...
+```
 
+### Running Unit Tests Without Redis or a Container Runtime
+By default, the `internal/statestore/redis` package uses Testcontainers to launch an ephemeral Redis container. If you are running in an environment without a local Redis server or container runtime (such as Cloud Shell or a restricted CI container), set `OM_SKIP_REDIS_TESTS=true` to run all unit and in-memory integration tests without Redis:
+```
+OM_SKIP_REDIS_TESTS=true go test -race -count=1 ./...
+```
+
+### Running the Synthetic Burst Replication Stress Test and Cache Benchmarks
+The `internal/statestore/cache` package includes a synthetic burst replication stress test (`TestSyntheticBurstReplicationStress`) that simulates high-concurrency match ticket deactivations and concurrent min-heap TTL expirations, as well as microbenchmarks for cache expiration (`BenchmarkExpireCacheEntries`), active ticket snapshotting (`BenchmarkSnapshotActiveTickets`), and unpacked vs. packed replication throughput (`BenchmarkReplicationThroughput`):
+```
+# Run the synthetic burst replication stress test with the race detector
+go test -race -v -run TestSyntheticBurstReplicationStress ./internal/statestore/cache
+
+# Run the internal/statestore/cache benchmarks
+go test -bench=. -benchmem ./internal/statestore/cache
+```
+
+### Smoke-Testing a Running Instance
 If you want to quickly test a running copy of `om-core`, the file `docs/example_ticket.json` has an example of a JSON-formatted ticket that will pass validation against the `v2/tickets` RESTful HTTP API endpoint with a command like this:
 ```
 curl -H "Authorization: Bearer $(gcloud auth print-identity-token)" \

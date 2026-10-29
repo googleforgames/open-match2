@@ -6,21 +6,33 @@ Here are answers to common questions regarding the tuning, configuration, and be
 
 #### **Tuning & Performance**
 
-**Q: How do I know if my Open Match core instances are keeping up with state replication?**
+**Q: How do I know if my Open Match core instances are keeping up with state replication, and how do I tune replication performance?**
 
-A: You should monitor the `om_core.cache.incoming.updates` and `om_core.cache.incoming.timeouts.full` metrics.
+A: Start by monitoring `om_core.cache.replication.lag`, which measures the end-to-end time (in milliseconds) between when a state update is written to the Redis Stream and when it is applied to an instance's local `ReplicatedTicketCache`, alongside the queue depth gauges `om_core.cache.incoming.backlog` and `om_core.cache.outgoing.backlog`.
 
-* `om_core.cache.incoming.updates`: This metric shows how many updates an instance processes in each polling cycle. It's normal for this number to occasionally spike to the maximum configured value (`OM_CACHE_IN_MAX_UPDATES_PER_POLL`). However, if this metric is *consistently* at the maximum, it's a sign that the instance may not be processing updates from Redis as fast as they are arriving.  
-* `om_core.cache.incoming.timeouts.full`: This counter increments when an instance cannot process all pending updates within its internal time limit. Occasional increments are fine, but if this counter is increasing rapidly, it's a clear indicator that the instance is falling behind on replication.
+For high-throughput or bursty matchmaking workloads, the most impactful first step is enabling packed ticket state updates by setting `OM_CACHE_PACK_TICKET_STATE_UPDATES=true` (and optionally tuning `OM_CACHE_OUT_MAX_PACKED_KEYS`, default `500`). This coalesces contiguous ticket activation and deactivation operations—including concurrent requests across callers—into multi-key Redis Stream entries, substantially reducing both outgoing write overhead and incoming stream entry volume.
 
-If you see these signs, you can try lowering the `OM_CACHE_IN_SLEEP_BETWEEN_APPLYING_UPDATES_MS` value. Be aware that every millisecond you remove from this sleep time is a millisecond that the core process cannot spend on handling API calls, so there is a trade-off.
+If `om_core.cache.replication.lag` remains elevated, you can isolate and tune the specific stage of the pipeline using the following four bottleneck scenarios:
+
+1. **Slow Incoming Polling**:
+   * **Symptoms**: `om_core.cache.incoming.polls.full` increments frequently and `om_core.cache.incoming.updates` is consistently at `OM_CACHE_IN_MAX_UPDATES_PER_POLL`, or `om_core.cache.incoming.poll.duration` / `om_core.cache.incoming.poll.wait` are high while `om_core.cache.incoming.backlog` stays low.
+   * **Tuning**: Increase `OM_CACHE_IN_MAX_UPDATES_PER_POLL` (default `10000`) to fetch larger batches per `XREAD` call, and lower `OM_CACHE_IN_FULL_POLL_WAIT_MS` (default `100` ms) or `OM_CACHE_IN_POLL_WAIT_MS` (default `250` ms) to poll more frequently. If `om_core.cache.incoming.poll.duration` is high during active polls, scale out Redis read replicas (`OM_REDIS_READ_HOST`).
+2. **Slow Local Cache Apply Cycles**:
+   * **Symptoms**: `om_core.cache.incoming.backlog` and `om_core.cache.incoming.queue.wait` grow, `om_core.cache.incoming.timeouts.full` increments (indicating the applier hit `OM_CACHE_IN_MAX_APPLY_DURATION_MS` before draining pending updates), or `om_core.cache.incoming.apply.sleep` dominates the cycle time.
+   * **Tuning**: Lower `OM_CACHE_IN_SLEEP_BETWEEN_APPLYING_UPDATES_MS` (default `500` ms) and `OM_CACHE_IN_FULL_APPLY_SLEEP_MS` (default `100` ms), increase `OM_CACHE_IN_MAX_APPLY_DURATION_MS` (default `500` ms) or `OM_CACHE_IN_QUEUE_BUFFER_SIZE` (default `20000`), and ensure the container has always-on CPU allocated (e.g., `--no-cpu-throttling` on Cloud Run). Be aware that reducing applier sleep leaves slightly less CPU time for handling API requests.
+3. **Outgoing Queue Contention**:
+   * **Symptoms**: `om_core.cache.outgoing.backlog` and `om_core.cache.outgoing.queue.wait` are elevated, `om_core.cache.outgoing.maxqueuethresholdreached` climbs rapidly, or `om_core.cache.outgoing.send.duration` is high.
+   * **Tuning**: Enable `OM_CACHE_PACK_TICKET_STATE_UPDATES=true` (and tune `OM_CACHE_OUT_MAX_PACKED_KEYS`), increase `OM_CACHE_OUT_MAX_QUEUE_THRESHOLD` (default `50`) and `OM_CACHE_OUT_QUEUE_BUFFER_SIZE` (default `500`), or lower `OM_CACHE_OUT_WAIT_TIMEOUT_MS` (default `500` ms) so smaller batches flush sooner.
+4. **High MMF Prep or Deactivation Wait**:
+   * **Symptoms**: `om_core.mmf.prep.duration` is high before MMFs are invoked, or `om_core.mmf.deactivation.wait` is high and `om_core.mmf.deactivation.timeouts` increments after MMFs return matches.
+   * **Tuning**: High `om_core.mmf.prep.duration` means `InvokeMatchmakingFunctions` is spending significant time filtering active tickets and chunking pools—favor more profiles with narrower pool filters and keep `OM_CACHE_TICKET_TTL_MS` tight. High `om_core.mmf.deactivation.wait` or `om_core.mmf.deactivation.timeouts` reflects round-trip outgoing write plus incoming apply latency; apply the outgoing and incoming tuning steps above and adjust `OM_MATCH_TICKET_DEACTIVATION_TIMEOUT_MS` (default `60000` ms) to match your latency budget.
 
 **Q: Should I wait for ticket deactivation before returning a match (`OM_MATCH_TICKET_DEACTIVATION_WAIT`)?**
 
 A: This setting controls a trade-off between speed and consistency.
 
-* **`true` (Default & Recommended)**: Open Match will wait to confirm that all tickets in a match have been marked as `inactive` in its local cache before returning the match to your Director. This is safer and significantly reduces the chance that the same ticket will be proposed in another match by a different MMF.  
-* **`false`**: Open Match returns the match immediately and *then* attempts to deactivate the tickets. This is faster but less safe. It's possible that before the deactivation is replicated, another matchmaking cycle could begin and propose the same tickets in a new match.
+* **`true` (Default & Recommended)**: Open Match will wait up to `OM_MATCH_TICKET_DEACTIVATION_TIMEOUT_MS` (default `60000` ms) to confirm that all valid tickets in a match have been marked as `inactive` in its local cache before returning the match to your Director (recording the wait time on `om_core.mmf.deactivation.wait`). This is safer and significantly reduces the chance that the same ticket will be proposed in another match by a different MMF. If the deactivation write fails or the wait reaches `OM_MATCH_TICKET_DEACTIVATION_TIMEOUT_MS`, Open Match increments `om_core.mmf.deactivation.timeouts`, annotates the match's `extensions` field with a boolean `true` value (`google.protobuf.BoolValue`) under the `"deactivation_timeout"` key, and returns the match so your Director can detect the timeout and handle potential ticket collisions accordingly.
+* **`false`**: Open Match returns the match immediately and *then* deactivates the tickets asynchronously in the background. This is faster but less safe. It's possible that before the deactivation is replicated, another matchmaking cycle could begin and propose the same tickets in a new match.
 
 **Q: What happens if my matchmaker cancels the context during `InvokeMatchmakingFunctions`?**
 
@@ -68,6 +80,10 @@ A practical example of how to derive this number:
 1. Set the TTL: Set `OM_CACHE_TICKET_TTL_MS` to slightly more than that hard deadline (e.g., 7 minutes and 30 seconds).
 
 Any player waiting longer than 7 minutes is an edge case. You should handle them using the [Long-Lived Tickets pattern from the Advanced topics documentation](ADVANCED.md#handling-long-lived-tickets): detect the approaching expiration on the client/frontend, and transparently re-create a new ticket with high-priority flags. This keeps the Open Match core lean and performant while still supporting long wait times for specific players.
+
+Under the hood, `OM_CACHE_TICKET_TTL_MS` governs two cleanup mechanisms:
+* **Local Min-Heap Expiration**: Each `om-core` instance runs an asynchronous expiration sweep every `OM_CACHE_EXPIRATION_INTERVAL_MS` (default `1000` ms) over deadline-ordered min-heaps, evicting up to `OM_CACHE_EXPIRATION_MAX_DELETES_PER_CYCLE` (default `5000`) expired entries per cycle in small lock-bounded chunks.
+* **Redis Stream Trimming**: Each outgoing replication write batch trims expired entries from the `om-replication` Redis Stream using `XTRIM om-replication MINID ~ <threshold>` (computed from `OM_CACHE_TICKET_TTL_MS` plus `OM_CACHE_ASSIGNMENT_ADDITIONAL_TTL_MS`). Keeping `OM_CACHE_TICKET_TTL_MS` tight bounds both in-memory cache size and Redis Stream memory usage.
 
 **Q: Why doesn't `InvokeMatchmakingFunctions` tell me how many tickets were in each pool?**
 

@@ -1,0 +1,47 @@
+# Compiled binaries and shared libraries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+v2
+open-match2
+om-core
+bin/
+dist/
+
+# Go test, coverage, profile, workspace, and vendor outputs
+*.test
+*.out
+coverage.*
+*.prof
+go.work
+go.work.sum
+vendor/
+
+# Unmoved protocol buffer compiler artifacts under proto/
+proto/protoc/
+proto/protoc-*.zip
+proto/*.pb.go
+proto/*.pb.gw.go
+proto/*.swagger.json
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# IDE, editor, scratch evaluation, and OS metadata files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
+docs/evaluations/
+docs/prs/
+.DS_Store
+.AppleDouble
+.LSOverride
+._*

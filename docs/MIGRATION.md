@@ -2,7 +2,7 @@
 
 # **Open Match 2: A Technical Evolution**
 
-This document provides a detailed technical comparison between Open Match 1 (OM1) and Open Match 2 (OM2), focusing on the key architectural and design changes.
+This document provides a detailed technical comparison between Open Match 1 (OM1) and Open Match 2 (OM2), focusing on the key architectural and design changes. For additional details, see [README.md](../README.md), [DEVELOPMENT.md](DEVELOPMENT.md), [ADVANCED.md](ADVANCED.md), [METRICS.md](METRICS.md), and [FAQ.md](FAQ.md).
 
 ## **A Unified, Flexible Core Architecture & Deployment**
 
@@ -10,13 +10,13 @@ The most significant architectural change in OM2 is the move from a distributed 
 
 Each instance of the `om-core` service is designed to be fully independent. It establishes its own read and write connections to Redis and can handle API requests from both your game client services (for ticket creation via the `CreateTicket` RPC) and your matchmaker (the director, which calls `InvokeMatchmakingFunctions`).
 
-This unified design does not preclude advanced deployment patterns. The architecture explicitly supports the ability to run separate, horizontally-scaled pools of `om-core` instances for different purposes. For example, a team could maintain a large, auto-scaling pool dedicated to the high volume of incoming `CreateTicket` requests, and a separate, smaller pool for running the less frequent but more resource-intensive `InvokeMatchmakingFunction`. We worked hard to ensure no part of the design compromises this flexibility.
+This unified design does not preclude advanced deployment patterns. The architecture explicitly supports the ability to run separate, horizontally-scaled pools of `om-core` instances for different purposes. For example, a team could maintain a large, auto-scaling pool dedicated to the high volume of incoming `CreateTicket` requests, and a separate, smaller pool for running the less frequent but more resource-intensive `InvokeMatchmakingFunctions`. We worked hard to ensure no part of the design compromises this flexibility.
 
 ## **Build & Local Development**
 
 The developer experience for building and testing Open Match has been fundamentally reworked for simplicity and speed. OM1 relied on a complex, 1000+ line `Makefile` to manage the build and containerization process. This system was powerful but often opaque and difficult to troubleshoot.
 
-OM2 replaces this with **CNCF Buildpacks**. This modern, cloud-native approach automatically transforms source code into an optimized, secure container image without requiring a Dockerfile or complex build scripts. This shift makes the entire build process more transparent and significantly easier to debug.
+OM2 replaces this with **CNCF Buildpacks** (see [DEVELOPMENT.md](DEVELOPMENT.md)). This modern, cloud-native approach automatically transforms source code into an optimized, secure container image without requiring a Dockerfile or complex build scripts. This shift makes the entire build process more transparent and significantly easier to debug.
 
 For local development, OM2 introduces a major quality-of-life improvement: a built-in in-memory state store. Previously, developers needed to run and configure a local Redis instance just to get started. Now, you can run the entire `om-core` service with a single `go run .` command, using the in-memory replicator for a fast, dependency-free development loop.
 
@@ -28,13 +28,13 @@ A key improvement is the native integration of a **gRPC-Gateway**. This gateway 
 
 ## **State Management Optimized for Redis Read Replicas**
 
-Open Match 2 introduces an in-memory `ReplicatedTicketCache` within each `om-core` instance to replace direct Redis queries. As a result, all ticket reads for invoking MMFs are now coming from local memory, making them as fast as possible.
+Open Match 2 introduces an in-memory `ReplicatedTicketCache` within each `om-core` instance to replace direct Redis queries (see [ADVANCED.md](ADVANCED.md)). As a result, all ticket reads for invoking MMFs are now coming from local memory, making them as fast as possible.
 
 For production environments, Redis is used as the ticket replication mechanism between each `om-core` instance. Each `om-core` instance is configured with distinct **read and write Redis endpoints**. In a typical production topology, all instances would point their write configuration to a single Redis primary instance. The read configuration, however, would point to one or more read replicas. This allows you to distribute the high volume of ticket-pooling reads across multiple replicas, dramatically increasing the read throughput of your matchmaking system. This design avoids the need for more operationally complex topologies like Redis Cluster or the use of Redis Sentinel, providing massive scalability with a simpler infrastructure footprint, and one that is simple to stand up and get production ready quickly using Cloud Memorystore for Redis on Google Cloud.
 
 ## **Configuration: The 12-Factor Approach**
 
-OM2's configuration system has been entirely reworked to be simpler, more discoverable, and more aligned with modern cloud-native principles. It fully embraces a **12-factor app methodology**, where all configuration is managed through environment variables.
+OM2's configuration system has been entirely reworked to be simpler, more discoverable, and more aligned with modern cloud-native principles. It fully embraces a **12-factor app methodology**, where all configuration is managed through environment variables (and observability is exposed via OpenTelemetry as documented in [METRICS.md](METRICS.md) and [FAQ.md](FAQ.md)).
 
 This approach eliminates the need to manage configuration through layered YAML files applied in opaque ways by complicated Helm charts. More importantly, all configuration has been centralized into a single Go code module (`internal/config`). This module serves as the single source of truth where every configuration variable: its default value and purpose are defined and documented directly in the code. When the `om-core` service starts, it logs all the values it is using at the `debug` log level. This makes exploring and understanding the available settings significantly simpler than in OM1, as developers can go to one place in the code to see every possible configuration option without hunting through Helm charts or external documentation.  Updating a value is as simple as making a new `om-core` deployment with the adjusted environment variable values, which is well supported by cloud-native platforms such as GKE and Cloud Run.
 
@@ -74,19 +74,19 @@ The most significant infrastructural change is the shift from a direct gRPC conn
 
 The method for retrieving match assignments has been completely redesigned to improve scalability. The client-side polling model from OM1 is now an explicit anti-pattern.
 
-* **In OM1 (frontend.txt),** clients would call the GetAssignments RPC and enter a long-polling loop, repeatedly querying the om-frontend service until a match was found.
-* In OM2, this model is deprecated. The api.txt definition for the OpenMatchService has comments to make this clear.
-* The assignment logic is now handled by your **matchmaker**, which receives the complete Match object. The client should expect a push notification from your game's own backend services, not from Open Match.
+* **In OM1 (`frontend.proto`),** clients would call the `GetAssignments` RPC and enter a long-polling loop, repeatedly querying the `om-frontend` service until a match was found.
+* **In OM2 (`openmatch.proto`),** this model is deprecated. The `openmatch.proto` definition for `OpenMatchService` marks `CreateAssignments` and `WatchAssignments` as deprecated (`NOTE: DEPRECATED RPCs BELOW, DO NOT USE IN PRODUCTION`).
+* The assignment logic is now handled by your **matchmaker**, which receives the complete `Match` object. The client should expect a push notification from your game's own backend services, not from Open Match.
 
 #### **3\. Ticket Protobuf Definition Changes**
 
-| Open Match 1 (messages (om1).txt) | Open Match 2 (messages (om2).txt) | Analysis of Change |
+| Open Match 1 (`messages.proto`) | Open Match 2 (`openmatch.proto`) | Analysis of Change |
 | :---- | :---- | :---- |
-| Assignment assignment | *Field removed* | The Assignment is no longer part of the Ticket state, reinforcing that it is the client's responsibility to get ticket assignments from whatever part of your Matchmaker is allocating game servers to matches. |
-| SearchFields search\_fields | Attributes attributes | Renamed for clarity. This field still holds the searchable tags and key/value data for filtering but is now more logically named. |
-| google.protobuf.Timestamp create\_time | *Field removed from proto, expiration\_time added* | The create\_time field is no longer part of the Ticket message definition. This timestamp is now automatically generated by the underlying state replication layer (Redis Streams) when the ticket is persisted. The new expiration\_time field has been added to the message to give developers explicit control over the ticket's lifecycle and time-to-live (TTL) in the cache. |
+| `Assignment assignment` | *Field removed* | The `Assignment` is no longer part of the `Ticket` state, reinforcing that it is the client's responsibility to get ticket assignments from whatever part of your Matchmaker is allocating game servers to matches. |
+| `SearchFields search_fields` | `FilterableData attributes` | Renamed for clarity. This field still holds the searchable tags and key/value data for filtering (`Ticket.attributes`) but is now more logically named. |
+| `google.protobuf.Timestamp create_time` | `Ticket.attributes.creation_time` (`FilterableData.creation_time`) & `Ticket.expiration_time` | Creation time moved from the top-level `Ticket` message into `Ticket.attributes.creation_time` (`FilterableData.creation_time`) alongside the other filterable attributes (and defaults to the server timestamp when omitted). A top-level `expiration_time` field was added to `Ticket`, defaulting to `creation_time` plus `OM_CACHE_TICKET_TTL_MS` when left unset. |
 
-The Ticket message itself has evolved between versions, reflecting the larger architectural shifts.
+The `Ticket` message itself has evolved between versions, reflecting the larger architectural shifts.
 
 #### **4\. Ticket ID Generation**
 
@@ -106,13 +106,13 @@ This allows you to later query Open Match for the ticket associated with your cu
 
 The lifecycle of a ticket in Open Match 2 is fundamentally different from OM1. Manual deletion is no longer supported, replaced by an automated, time-based expiration system.
 
-To remove a ticket from matchmaking consideration, you should deactivate it using the `DeactivateTickets` RPC. This moves the ticket into an "inactive" set, where it will be ignored by future matchmaking functions. All tickets are now automatically deleted from the system by the underlying state replication layer when their expiration time is reached. When creating a ticket, you can set the `expiration_time` field. If left unset, a default ticket time-to-live (TTL) is applied from the `om-core` configuration (`OM_CACHE_TICKET_TTL_MS` environment variable). The `expiration_time` is immutable after creation; to extend a ticket's life, you must re-create it. For use cases where you need to preserve priority across these re-creations (e.g., to prevent starvation), you should add a custom timestamp to the ticket's `extensions` field and code your MMFs to use it.
+To remove a ticket from matchmaking consideration, you should deactivate it using the `DeactivateTickets` RPC. This moves the ticket into an "inactive" set, where it will be ignored by future matchmaking functions. All tickets are now automatically deleted from the system when their expiration time is reached. When creating a ticket, you can set the `expiration_time` field. If left unset, a default ticket time-to-live (TTL) is applied by adding `OM_CACHE_TICKET_TTL_MS` to `Ticket.attributes.creation_time`. The `expiration_time` is immutable after creation; to extend a ticket's life, you must re-create it. For use cases where you need to preserve priority across these re-creations (e.g., to prevent starvation), you should add a custom timestamp to the ticket's `extensions` field and code your MMFs to use it (see [ADVANCED.md](ADVANCED.md#handling-long-lived-tickets)).
 
-This new lifecycle model provides several key advantages. By offloading deletion to the underlying state store's TTL mechanism, the **`om-core` code is significantly simplified**. This design **eliminates many previous causes of ticket 'leakage'**, where tickets could get stuck in the system due to bugs or race conditions, because every ticket now has a guaranteed maximum lifetime. As a result, **developers no longer need to build or run their own manual cleanup tools** to find and remove old or abandoned tickets; the system is now self-cleaning by design.
+This new lifecycle model provides several key advantages. By offloading deletion to automatic TTL expiration, the **`om-core` code is significantly simplified**. This design **eliminates many previous causes of ticket 'leakage'**, where tickets could get stuck in the system due to bugs or race conditions, because every ticket now has a guaranteed maximum lifetime. As a result, **developers no longer need to build or run their own manual cleanup tools** to find and remove old or abandoned tickets; the system is now self-cleaning by design.
 
 ## **Migrating Your Open Match Matchmaker from v1 to v2**
 
-This section explains how to update your matchmaking logic to work with the new, more powerful APIs in Open Match 2 (OM2). It covers the evolution from OM1's gRPC-based FetchMatches/AssignTickets pattern to the new InvokeMatchmakingFunctions streaming API in OM2, which is accessible via a gRPC-Gateway.
+This section explains how to update your matchmaking logic to work with the new, more powerful APIs in Open Match 2 (OM2). It covers the evolution from OM1's gRPC-based `FetchMatches`/`AssignTickets` pattern to the new `InvokeMatchmakingFunctions` server-streaming API in OM2, which is accessible via a gRPC-Gateway.
 
 First, a note on terminology: going forward, we will refer to the developer-written service that orchestrates matchmaking as a **"matchmaker."** The "director" pattern, which periodically fetches matches, is just one of many ways to build a matchmaker.
 
@@ -134,11 +134,11 @@ be := pb.NewBackendClient(conn)
 
 #### **2\. From FetchMatches to the InvokeMatchmakingFunctions Stream**
 
-The core matchmaking RPC has evolved from a simple request-stream to a more powerful bi-directional stream, enabling more dynamic and continuous matchmaking logic.
+The core matchmaking RPC in OM2 provides a streamlined server-streaming interface for your matchmaker while using chunked bi-directional streaming internally between `om-core` and your MMFs.
 
-* **OM1 Flow:** The FetchMatches RPC involved sending a single request containing all match profiles and then entering a simple loop to drain the response stream of all resulting matches.
+* **OM1 Flow:** The `FetchMatches` RPC sent a `FetchMatchesRequest` for a single profile and match function, and drained the response stream of match proposals before passing them to the Synchronizer/Evaluator.
 
-* **OM2 Flow:** The new InvokeMatchmakingFunctions RPC is a long-lived, **bi-directional stream**. This allows a matchmaker to send new or updated profiles and receive completed matches concurrently on the same stream without having to initiate new requests.
+* **OM2 Flow:** The `InvokeMatchmakingFunctions` RPC (`rpc InvokeMatchmakingFunctions(MmfRequest) returns (stream StreamedMmfResponse)`) is a **server-streaming RPC** taking a single `MmfRequest` (containing a `Profile` and one or more `MatchmakingFunctionSpec` targets) and returning a stream of `StreamedMmfResponse` messages as completed matches arrive concurrently from all invoked MMFs. Under the hood, the internal `mmf.Run` call from `om-core` to each MMF (`rpc Run(stream ChunkedMmfRunRequest) returns (stream StreamedMmfResponse)`) is a **client-chunked bi-directional stream** so `om-core` can split large populated ticket pools across multiple 4MB-safe `ChunkedMmfRunRequest` chunks while streaming matches back.
 
 #### **3\. The New Assignment Flow: AssignTickets is Deprecated**
 
@@ -158,13 +158,13 @@ This guide explains how to update your Matchmaking Function (MMF) from the Open 
 
 The fundamental gRPC contract for the MMF has evolved from a simple request-stream to a more flexible bi-directional stream. This requires changing the signature and core loop of your Run function.
 
-* In OM1 (matchfunction.proto), the Run RPC was a request-response stream:
-  rpc Run(RunRequest) returns (stream RunResponse)
-  Your MMF received a single RunRequest and then streamed back one or more RunResponse messages containing match proposals.
+* In OM1 (`matchfunction.proto`), the `Run` RPC was a server-streaming RPC:
+  `rpc Run(RunRequest) returns (stream RunResponse)`
+  Your MMF received a single `RunRequest` and then streamed back one or more `RunResponse` messages containing match proposals.
 
-* In OM2 (mmf.proto), the Run RPC is now a bi-directional stream:
-  rpc Run(stream ChunkedMmfRunRequest) returns (stream StreamedMmfResponse)
-  This means your MMF's Run function will now concurrently receive requests and send responses on the same stream, allowing for more efficient interaction with om-core.
+* In OM2 (`mmf.proto`), the `Run` RPC is now a client-chunked bi-directional stream:
+  `rpc Run(stream ChunkedMmfRunRequest) returns (stream StreamedMmfResponse)`
+  This means your MMF's `Run` function receives a stream of `ChunkedMmfRunRequest` chunks from `om-core` and streams back `StreamedMmfResponse` messages on the same stream.
 
 #### **2\. How You Receive Tickets**
 

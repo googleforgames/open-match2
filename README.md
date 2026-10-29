@@ -5,7 +5,7 @@ a scalable and extensible Matchmaker. It is designed to give the game developer
 full control over how to make matches while removing the burden of dealing with
 the challenges of running a production service at scale.
 
-This repository contains the core components for the public preview of Open Match 2. It includes the main Go application, Protocol Buffer (protobuf) definitions, and generated Go client libraries. Here's a high-level overview of the key directories:
+This repository contains the core components for Open Match 2. It includes the main Go application, Protocol Buffer (protobuf) definitions, and generated Go client libraries. Here's a high-level overview of the key directories:
 
 * `main.go` (also called `om-core` in places where it may not be obvious that it is part of Open Match) is the core Open Match 2 application. It serves all the Open Match 2 API endpoints from a single horizontally-scalable container image.
 
@@ -48,7 +48,7 @@ We have started to build out documentation for Open Match 2. Here are some of th
 
 ## Code of Conduct
 
-Participation in this project comes under the [Contributor Covenant Code of Conduct](code-of-conduct.md)
+Participation in this project comes under [Google's Open Source Community Guidelines](https://opensource.google.com/conduct/)
 
 ## License
 

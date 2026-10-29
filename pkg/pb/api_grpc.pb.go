@@ -84,10 +84,14 @@ type OpenMatchServiceClient interface {
 	// and output of matchmaking functions.
 	// All matches returned from all MMFs before the context deadline are then sent back
 	// to OM's InvokeMatchmakingFunctions handler, which does the following:
-	//   - Reads all rosters of all matches returned, and moves every ticket it finds in those
-	//     rosters to the 'inactive' state.
+	//   - Reads all rosters of all matches returned, and moves every ticket with a valid ID
+	//     it finds in those rosters to the 'inactive' state; invalid ticket IDs are listed
+	//     in the match's 'invalid_ticket_ids' extension.
 	//   - Records statistics/telemetry for the results.
-	//   - Sends those results out the output stream as a StreamedMmfResponse
+	//   - Sends every result out the output stream as a StreamedMmfResponse, including
+	//     matches with no valid tickets and responses with no match.
+	//   - If any MMF fails, ends the stream (after all results are sent) with an error
+	//     status summarizing each MMF failure.
 	//
 	// Note: cancelling the context (by, for example, closing the connection) does NOT
 	//
@@ -253,10 +257,14 @@ type OpenMatchServiceServer interface {
 	// and output of matchmaking functions.
 	// All matches returned from all MMFs before the context deadline are then sent back
 	// to OM's InvokeMatchmakingFunctions handler, which does the following:
-	//   - Reads all rosters of all matches returned, and moves every ticket it finds in those
-	//     rosters to the 'inactive' state.
+	//   - Reads all rosters of all matches returned, and moves every ticket with a valid ID
+	//     it finds in those rosters to the 'inactive' state; invalid ticket IDs are listed
+	//     in the match's 'invalid_ticket_ids' extension.
 	//   - Records statistics/telemetry for the results.
-	//   - Sends those results out the output stream as a StreamedMmfResponse
+	//   - Sends every result out the output stream as a StreamedMmfResponse, including
+	//     matches with no valid tickets and responses with no match.
+	//   - If any MMF fails, ends the stream (after all results are sent) with an error
+	//     status summarizing each MMF failure.
 	//
 	// Note: cancelling the context (by, for example, closing the connection) does NOT
 	//

@@ -13,7 +13,21 @@
 // limitations under the License.
 package store
 
-import "regexp"
+import (
+	"errors"
+	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
+)
+
+// Canonical validation sentinel errors returned by state replicators.
+var (
+	NoTicketKeyErr  = errors.New("Missing ticket key")
+	NoTicketDataErr = errors.New("No ticket data")
+	NoAssignmentErr = errors.New("Missing assignment")
+	InvalidInputErr = errors.New("Invalid input")
+)
 
 // An enum for the type of operations that the replication queue can process.
 const (
@@ -25,9 +39,122 @@ const (
 
 // Every change to the state of the tickets in om-core is modelled as a StateUpdate.
 type StateUpdate struct {
-	Cmd   int    // The operation this update contains
-	Key   string // The key to update
-	Value string // The value to associate with this key (if applicable)
+	Cmd    int      // The operation this update contains
+	Key    string   // The key to update
+	Keys   []string // Packed keys to update (for multi-ticket Activate/Deactivate)
+	Value  string   // The value to associate with this key (if applicable)
+	ReplId string   // The replication stream entry ID assigned to this update
+}
+
+// PrimaryKey returns the primary ticket key associated with the update so callers
+// can attribute errors regardless of whether Key or Keys was populated.
+func (u *StateUpdate) PrimaryKey() string {
+	if u == nil {
+		return ""
+	}
+	if u.Key != "" {
+		return u.Key
+	}
+	for _, k := range u.Keys {
+		if k != "" {
+			return k
+		}
+	}
+	return ""
+}
+
+// String formats a human-readable summary of the StateUpdate suitable for logging,
+// truncating packed key slices beyond 3 keys and summarizing binary ticket payloads
+// by byte count.
+func (u StateUpdate) String() string {
+	var keysSummary string
+	switch {
+	case len(u.Keys) == 0:
+		keysSummary = ""
+	case len(u.Keys) <= 3:
+		keysSummary = fmt.Sprintf("[%s]", strings.Join(u.Keys, " "))
+	default:
+		keysSummary = fmt.Sprintf("[%s ...]", strings.Join(u.Keys[:3], " "))
+	}
+
+	valSummary := u.Value
+	if u.Cmd == Ticket && u.Value != "" {
+		valSummary = fmt.Sprintf("<%d bytes>", len(u.Value))
+	}
+
+	return fmt.Sprintf("{Cmd:%d Key:%s Keys:%s Value:%s ReplId:%s}",
+		u.Cmd, u.Key, keysSummary, valSummary, u.ReplId)
+}
+
+// ParseReplIdTimestampMs extracts the creation timestamp in Unix milliseconds from
+// a Redis Stream entry ID formatted as "<timestampMs>-<seq>".
+func ParseReplIdTimestampMs(replId string) (int64, error) {
+	parts := strings.Split(replId, "-")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return 0, fmt.Errorf("invalid replication ID %q", replId)
+	}
+	if strings.HasPrefix(parts[0], "+") || strings.HasPrefix(parts[1], "+") {
+		return 0, fmt.Errorf("invalid replication ID %q", replId)
+	}
+	ts, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || ts < 0 {
+		return 0, fmt.Errorf("invalid replication ID %q", replId)
+	}
+	seq, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil || seq < 0 {
+		return 0, fmt.Errorf("invalid replication ID %q", replId)
+	}
+	return ts, nil
+}
+
+// CompareReplIds numerically compares two replication IDs formatted as "<timestampMs>-<seq>".
+// It returns -1 if a < b, 0 if a == b, and +1 if a > b.
+func CompareReplIds(a, b string) int {
+	if a == b {
+		return 0
+	}
+	if a == "" {
+		return -1
+	}
+	if b == "" {
+		return 1
+	}
+
+	aTs, aSeq, aOk := splitUnsignedReplId(a)
+	bTs, bSeq, bOk := splitUnsignedReplId(b)
+	if !aOk || !bOk {
+		return strings.Compare(a, b)
+	}
+
+	if aTs < bTs {
+		return -1
+	}
+	if aTs > bTs {
+		return 1
+	}
+	if aSeq < bSeq {
+		return -1
+	}
+	if aSeq > bSeq {
+		return 1
+	}
+	return 0
+}
+
+func splitUnsignedReplId(replId string) (uint64, uint64, bool) {
+	parts := strings.Split(replId, "-")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return 0, 0, false
+	}
+	ts, err := strconv.ParseUint(parts[0], 10, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	seq, err := strconv.ParseUint(parts[1], 10, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	return ts, seq, true
 }
 
 // Results of changes to the state of the cache. State replication batches

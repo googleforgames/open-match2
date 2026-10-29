@@ -30,7 +30,10 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
 )
 
-const metricsNamePrefix = "om_core."
+const (
+	metricsNamePrefix = "om_core."
+	serviceVersion    = "2.1.0"
+)
 
 var (
 	otelLogger = logrus.WithFields(logrus.Fields{
@@ -41,21 +44,24 @@ var (
 
 	// Metric variable declarations are global, so they can be accessed directly in the application code.
 	// Metrics populated by the grpc function implementations in main.go.
-	otelActivationsPerCall                                 otelmetrics.Int64Histogram
-	otelInvalidIdsPerActivateCall                          otelmetrics.Int64Histogram
-	otelFailedIdsPerActivateCall                           otelmetrics.Int64Histogram
-	otelDeactivationsPerCall                               otelmetrics.Int64Histogram
-	otelInvalidIdsPerDeactivateCall                        otelmetrics.Int64Histogram
-	otelFailedIdsPerDeactivateCall                         otelmetrics.Int64Histogram
-	otelAssignmentsPerCall                                 otelmetrics.Int64Histogram
-	otelProfileChunksPerInvokeMMFCall                      otelmetrics.Int64Histogram
-	otelCachedTicketsAvailableForFilteringPerInvokeMMFCall otelmetrics.Int64Histogram
-	otelPoolsPerProfile                                    otelmetrics.Int64Histogram
-	otelTicketSize                                         otelmetrics.Float64Histogram
-	otelMmfTicketDeactivations                             otelmetrics.Int64Counter
-	otelMmfFailures                                        otelmetrics.Int64Counter
-	otelMatches                                            otelmetrics.Int64Counter
-	otelAssignmentWatches                                  otelmetrics.Int64UpDownCounter
+	otelTicketCreations          otelmetrics.Int64Counter
+	otelTicketSize               otelmetrics.Float64Histogram
+	otelDeactivationsPerCall     otelmetrics.Int64Histogram
+	otelInvalidIdsPerDeactivateCall otelmetrics.Int64Histogram
+	otelFailedIdsPerDeactivateCall  otelmetrics.Int64Histogram
+	otelActivationsPerCall       otelmetrics.Int64Histogram
+	otelInvalidIdsPerActivateCall   otelmetrics.Int64Histogram
+	otelFailedIdsPerActivateCall    otelmetrics.Int64Histogram
+	otelMmfCalls                 otelmetrics.Int64Counter
+	otelMmfFailures              otelmetrics.Int64Counter
+	otelMmfTicketDeactivations   otelmetrics.Int64Counter
+	otelMatches                  otelmetrics.Int64Counter
+	otelMmfPrepDuration          otelmetrics.Float64Histogram
+	otelMmfDeactivationWait      otelmetrics.Float64Histogram
+	otelMmfDeactivationTimeouts  otelmetrics.Int64Counter
+	otelAssignmentsPerCall       otelmetrics.Int64Counter
+	otelTicketAssignmentFailures otelmetrics.Int64Counter
+	otelAssignmentWatches        otelmetrics.Int64UpDownCounter
 
 	// Metrics populated by the server.go:HandleRPC() grpc StatsHandler function.
 	otelRpcDuration otelmetrics.Float64Histogram
@@ -71,26 +77,25 @@ var (
 func initializeOtel() (*otelmetrics.Meter, func(context.Context) error) {
 	ctx := context.Background()
 
-	// Get resource attributes
+	// Get resource attributes in ascending precedence order (later options override earlier ones).
 	res, err := resource.New(
 		context.Background(),
-		// Use the GCP resource detector to detect information about the GCP platform
+		// Use the GCP resource detector to detect information about the GCP platform.
 		resource.WithDetectors(gcp.NewDetector()),
-		// Discover and provide attributes from OTEL_RESOURCE_ATTRIBUTES and OTEL_SERVICE_NAME environment variables.
-		resource.WithFromEnv(),
 		// Discover and provide information about the OpenTelemetry SDK used.
 		resource.WithTelemetrySDK(),
-		// Open Match attributes
+		// Compiled default Open Match attributes.
 		resource.WithAttributes(
 			semconv.ServiceNameKey.String("open_match"),
-			semconv.ServiceVersionKey.String("2.0.0"),
+			semconv.ServiceVersionKey.String(serviceVersion),
 		),
+		// Discover and provide attributes from OTEL_RESOURCE_ATTRIBUTES and OTEL_SERVICE_NAME environment variables.
+		resource.WithFromEnv(),
 	)
 	if errors.Is(err, resource.ErrPartialResource) || errors.Is(err, resource.ErrSchemaURLConflict) {
 		otelLogger.Println(err) // Log non-fatal issues.
 	} else if err != nil {
 		otelLogger.WithError(err).Errorf("Failed to create open telemetry resource")
-
 	}
 
 	// Init otel exporter for use by the collector sidecar.
@@ -111,30 +116,29 @@ func initializeOtel() (*otelmetrics.Meter, func(context.Context) error) {
 	return &meter, provider.Shutdown
 }
 
-// initializeOtelWithLocalProm runs  a default OpenTelemetry Reader and
+// initializeOtelWithLocalProm runs a default OpenTelemetry Reader and
 // implements prometheus.Collector, allowing it to be used as both a Reader and
 // Collector. http://localhost:2223/metrics . For use with local development.
 func initializeOtelWithLocalProm() (*otelmetrics.Meter, func(context.Context) error) { //nolint:unused
-	// Get resource attributes
+	// Get resource attributes in ascending precedence order (later options override earlier ones).
 	res, err := resource.New(
 		context.Background(),
-		// Use the GCP resource detector to detect information about the GCP platform
+		// Use the GCP resource detector to detect information about the GCP platform.
 		resource.WithDetectors(gcp.NewDetector()),
-		// Discover and provide attributes from OTEL_RESOURCE_ATTRIBUTES and OTEL_SERVICE_NAME environment variables.
-		resource.WithFromEnv(),
 		// Discover and provide information about the OpenTelemetry SDK used.
 		resource.WithTelemetrySDK(),
-		// Open Match attributes
+		// Compiled default Open Match attributes.
 		resource.WithAttributes(
 			semconv.ServiceNameKey.String("open_match"),
-			semconv.ServiceVersionKey.String("2.0.0"),
+			semconv.ServiceVersionKey.String(serviceVersion),
 		),
+		// Discover and provide attributes from OTEL_RESOURCE_ATTRIBUTES and OTEL_SERVICE_NAME environment variables.
+		resource.WithFromEnv(),
 	)
 	if errors.Is(err, resource.ErrPartialResource) || errors.Is(err, resource.ErrSchemaURLConflict) {
 		otelLogger.Println(err) // Log non-fatal issues.
 	} else if err != nil {
 		otelLogger.WithError(err).Errorf("Failed to create open telemetry resource")
-
 	}
 
 	// This exporter embeds a default OpenTelemetry Reader and
@@ -144,11 +148,19 @@ func initializeOtelWithLocalProm() (*otelmetrics.Meter, func(context.Context) er
 		otelLogger.Fatal(err)
 	}
 
+	promPort := "2223"
+	if cfg != nil {
+		if configuredPort := cfg.GetString("OM_PROM_PORT"); configuredPort != "" {
+			promPort = configuredPort
+		}
+	}
+
 	// Start the prometheus HTTP server and pass the exporter Collector to it
 	go func() {
-		otelLogger.Infof("serving metrics at localhost:2223/metrics")
-		http.Handle("/metrics", promhttp.Handler())
-		err := http.ListenAndServe(":2223", nil) //nolint:gosec // Ignoring G114: Use of net/http serve function that has no support for setting timeouts.
+		otelLogger.Infof("serving metrics at localhost:%s/metrics", promPort)
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", promhttp.Handler())
+		err := http.ListenAndServe(":"+promPort, mux) //nolint:gosec // Ignoring G114: Use of net/http serve function that has no support for setting timeouts.
 		if err != nil {
 			fmt.Printf("error serving http: %v", err)
 			return
@@ -162,21 +174,15 @@ func initializeOtelWithLocalProm() (*otelmetrics.Meter, func(context.Context) er
 	return &meter, provider.Shutdown
 }
 
-//nolint:cyclop // Cyclop linter sees each metric initialization as +1 cyclomatic complexity for some reason.
+//nolint:cyclop,funlen // Cyclop linter sees each metric initialization as +1 cyclomatic complexity for some reason.
 func registerMetrics(meterPointer *otelmetrics.Meter) {
+	if meterPointer == nil {
+		return
+	}
 	meter := *meterPointer
 	var err error
 
-	// Initialize all declared Metrics
-	otelTicketSize, err = meter.Float64Histogram(
-		metricsNamePrefix+"ticket.size",
-		otelmetrics.WithDescription("Size of successfully created tickets"),
-		otelmetrics.WithUnit("kb"),
-	)
-	if err != nil {
-		otelLogger.Fatal(err)
-	}
-
+	// 1. om_core.rpc.duration
 	otelRpcDuration, err = meter.Float64Histogram(
 		metricsNamePrefix+"rpc.duration",
 		otelmetrics.WithDescription("RPC duration"),
@@ -186,125 +192,177 @@ func registerMetrics(meterPointer *otelmetrics.Meter) {
 		otelLogger.Fatal(err)
 	}
 
+	// 2. om_core.rpc.errors
 	otelRpcErrors, err = meter.Int64Counter(
 		metricsNamePrefix+"rpc.errors",
-		otelmetrics.WithDescription("Total gRPC errors returned"),
+		otelmetrics.WithDescription("Number of RPC errors"),
 	)
 	if err != nil {
 		otelLogger.Fatal(err)
 	}
 
-	otelActivationsPerCall, err = meter.Int64Histogram(
-		metricsNamePrefix+"ticket.activation.requests",
-		otelmetrics.WithDescription("Total tickets set to active, so they appear in pools"),
+	// 3. om_core.ticket.creations
+	otelTicketCreations, err = meter.Int64Counter(
+		metricsNamePrefix+"ticket.creations",
+		otelmetrics.WithDescription("Number of tickets created"),
 	)
 	if err != nil {
 		otelLogger.Fatal(err)
 	}
 
-	otelInvalidIdsPerActivateCall, err = meter.Int64Histogram(
-		metricsNamePrefix+"ticket.activation.failures.invalid_id",
-		otelmetrics.WithDescription("Ticket activations per ActivateTickets rpc call that failed due to an invalid id"),
+	// 4. om_core.ticket.size
+	otelTicketSize, err = meter.Float64Histogram(
+		metricsNamePrefix+"ticket.size",
+		otelmetrics.WithDescription("Size of tickets in kilobytes"),
+		otelmetrics.WithUnit("KB"),
 	)
 	if err != nil {
 		otelLogger.Fatal(err)
 	}
 
-	otelFailedIdsPerActivateCall, err = meter.Int64Histogram(
-		metricsNamePrefix+"ticket.activation.failures.unspecified",
-		otelmetrics.WithDescription("Ticket activations per ActivateTickets rpc call that failed due to an unspecified error"),
-	)
-	if err != nil {
-		otelLogger.Fatal(err)
-	}
-
-	// TODO: Distinguish between active deactivations (using the API endpoint) and
-	// triggered deactivations (by matches returned from mmfs) using metric
-	// attributes at the time of recording...?
+	// 5. om_core.ticket.deactivations.per_call
 	otelDeactivationsPerCall, err = meter.Int64Histogram(
-		metricsNamePrefix+"ticket.deactivation.requests",
-		otelmetrics.WithDescription("Tickets set to deactive per DeactivateTickets rpc call"),
+		metricsNamePrefix+"ticket.deactivations.per_call",
+		otelmetrics.WithDescription("Number of tickets deactivated per DeactivateTickets call"),
 	)
 	if err != nil {
 		otelLogger.Fatal(err)
 	}
+
+	// 6. om_core.ticket.deactivation.failures.invalid_id
 	otelInvalidIdsPerDeactivateCall, err = meter.Int64Histogram(
 		metricsNamePrefix+"ticket.deactivation.failures.invalid_id",
-		otelmetrics.WithDescription("Ticket deactivations per DeactivateTickets rpc call that failed due to an invalid id"),
+		otelmetrics.WithDescription("Number of invalid ticket IDs per DeactivateTickets call"),
 	)
 	if err != nil {
 		otelLogger.Fatal(err)
 	}
+
+	// 7. om_core.ticket.deactivation.failures.unspecified
 	otelFailedIdsPerDeactivateCall, err = meter.Int64Histogram(
 		metricsNamePrefix+"ticket.deactivation.failures.unspecified",
-		otelmetrics.WithDescription("Ticket deactivations per DeactivateTickets rpc call that failed due to an unspecified error"),
+		otelmetrics.WithDescription("Number of tickets that failed to deactivate for unspecified reasons per DeactivateTickets call"),
 	)
 	if err != nil {
 		otelLogger.Fatal(err)
 	}
 
-	otelAssignmentsPerCall, err = meter.Int64Histogram(
-		metricsNamePrefix+"ticket.assignment",
-		otelmetrics.WithDescription("Number of tickets assignments included in each CreateAssignments() call"),
+	// 8. om_core.ticket.activations.per_call
+	otelActivationsPerCall, err = meter.Int64Histogram(
+		metricsNamePrefix+"ticket.activations.per_call",
+		otelmetrics.WithDescription("Number of tickets activated per ActivateTickets call"),
 	)
 	if err != nil {
 		otelLogger.Fatal(err)
 	}
 
-	otelAssignmentWatches, err = meter.Int64UpDownCounter(
-		metricsNamePrefix+"ticket.assigment.watch",
-		otelmetrics.WithDescription("Number of tickets assignments included in each CreateAssignments() call"),
+	// 9. om_core.ticket.activation.failures.invalid_id
+	otelInvalidIdsPerActivateCall, err = meter.Int64Histogram(
+		metricsNamePrefix+"ticket.activation.failures.invalid_id",
+		otelmetrics.WithDescription("Number of invalid ticket IDs per ActivateTickets call"),
 	)
 	if err != nil {
 		otelLogger.Fatal(err)
 	}
 
-	otelProfileChunksPerInvokeMMFCall, err = meter.Int64Histogram(
-		metricsNamePrefix+"profile.chunks",
-		otelmetrics.WithDescription("Number of chunks the profile was split into after all tickets were populated in all pools during the InvokeMatchmakingFunctions() call"),
+	// 10. om_core.ticket.activation.failures.unspecified
+	otelFailedIdsPerActivateCall, err = meter.Int64Histogram(
+		metricsNamePrefix+"ticket.activation.failures.unspecified",
+		otelmetrics.WithDescription("Number of tickets that failed to activate for unspecified reasons per ActivateTickets call"),
 	)
 	if err != nil {
 		otelLogger.Fatal(err)
 	}
 
-	otelCachedTicketsAvailableForFilteringPerInvokeMMFCall, err = meter.Int64Histogram(
-		metricsNamePrefix+"cache.tickets.available",
-		otelmetrics.WithDescription("Number of active tickets in the cache at the time the InvokeMatchmakingFunctions() call processed pool filters for the provided profile"),
+	// 11. om_core.mmf.calls
+	otelMmfCalls, err = meter.Int64Counter(
+		metricsNamePrefix+"mmf.calls",
+		otelmetrics.WithDescription("Number of Matchmaking Function (MMF) calls made"),
 	)
 	if err != nil {
 		otelLogger.Fatal(err)
 	}
 
-	otelPoolsPerProfile, err = meter.Int64Histogram(
-		metricsNamePrefix+"profile.pools",
-		otelmetrics.WithDescription("Number of pools in the profile provided to the InvokeMatchmakingFunctions() call"),
-	)
-	if err != nil {
-		otelLogger.Fatal(err)
-	}
-
+	// 12. om_core.mmf.failures
 	otelMmfFailures, err = meter.Int64Counter(
 		metricsNamePrefix+"mmf.failures",
-		otelmetrics.WithDescription("Number of MMF failures"),
+		otelmetrics.WithDescription("Number of Matchmaking Function (MMF) calls that returned an error"),
 	)
 	if err != nil {
 		otelLogger.Fatal(err)
 	}
 
+	// 13. om_core.mmf.ticket.deactivations
 	otelMmfTicketDeactivations, err = meter.Int64Counter(
-		metricsNamePrefix+"mmf.deactivations",
-		otelmetrics.WithDescription("Number of deactivations due to tickets being returned in matches by MMFs"),
+		metricsNamePrefix+"mmf.ticket.deactivations",
+		otelmetrics.WithDescription("Number of ticket deactivations initiated on behalf of Matchmaking Functions (MMFs)"),
 	)
 	if err != nil {
 		otelLogger.Fatal(err)
 	}
 
+	// 14. om_core.match.received
 	otelMatches, err = meter.Int64Counter(
 		metricsNamePrefix+"match.received",
-		otelmetrics.WithDescription("Total matches received from MMFs"),
+		otelmetrics.WithDescription("Number of matches received from Matchmaking Functions (MMFs) and returned to the caller; attribute match.has_tickets indicates whether the match had any valid ticket IDs"),
 	)
 	if err != nil {
 		otelLogger.Fatal(err)
 	}
 
+	// 15. om_core.mmf.prep.duration
+	otelMmfPrepDuration, err = meter.Float64Histogram(
+		metricsNamePrefix+"mmf.prep.duration",
+		otelmetrics.WithDescription("Time spent snapshotting active tickets, filtering pools, and chunking requests in InvokeMatchmakingFunctions before invoking MMFs"),
+		otelmetrics.WithUnit("ms"),
+	)
+	if err != nil {
+		otelLogger.Fatal(err)
+	}
+
+	// 16. om_core.mmf.deactivation.wait
+	otelMmfDeactivationWait, err = meter.Float64Histogram(
+		metricsNamePrefix+"mmf.deactivation.wait",
+		otelmetrics.WithDescription("Time spent waiting for match ticket deactivations to replicate to the local cache"),
+		otelmetrics.WithUnit("ms"),
+	)
+	if err != nil {
+		otelLogger.Fatal(err)
+	}
+
+	// 17. om_core.mmf.deactivation.timeouts
+	otelMmfDeactivationTimeouts, err = meter.Int64Counter(
+		metricsNamePrefix+"mmf.deactivation.timeouts",
+		otelmetrics.WithDescription("Number of times waiting for match ticket deactivations to replicate to the local cache timed out"),
+	)
+	if err != nil {
+		otelLogger.Fatal(err)
+	}
+
+	// 18. om_core.ticket.assignment
+	otelAssignmentsPerCall, err = meter.Int64Counter(
+		metricsNamePrefix+"ticket.assignment",
+		otelmetrics.WithDescription("Number of tickets assigned (DEPRECATED)"),
+	)
+	if err != nil {
+		otelLogger.Fatal(err)
+	}
+
+	// 19. om_core.ticket.assignment.failures
+	otelTicketAssignmentFailures, err = meter.Int64Counter(
+		metricsNamePrefix+"ticket.assignment.failures",
+		otelmetrics.WithDescription("Number of ticket assignment failures (DEPRECATED)"),
+	)
+	if err != nil {
+		otelLogger.Fatal(err)
+	}
+
+	// 20. om_core.ticket.assignment.watch
+	otelAssignmentWatches, err = meter.Int64UpDownCounter(
+		metricsNamePrefix+"ticket.assignment.watch",
+		otelmetrics.WithDescription("Number of tickets currently being watched for assignment"),
+	)
+	if err != nil {
+		otelLogger.Fatal(err)
+	}
 }

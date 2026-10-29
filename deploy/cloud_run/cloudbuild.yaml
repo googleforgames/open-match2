@@ -1,3 +1,17 @@
+# Copyright 2024 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 # To use this cloudbuild.yaml from it's directory:
 # gcloud builds submit --async --no-source \
 #   --substitutions=COMMIT_SHA=latest
@@ -28,7 +42,7 @@ substitutions:
 steps:
   # Deploy existing container image to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    id: "Deploy:ingress all, all egress vpc"
+    id: "Deploy:ingress internal, all egress vpc"
     waitFor: ["-"]
     entrypoint: gcloud
     args:
@@ -37,6 +51,11 @@ steps:
       # service config
       - ${_JOB_NAME}
       - --no-allow-unauthenticated
+      - --no-cpu-throttling
+      - --execution-environment
+      - gen2
+      - --min-instances
+      - "2"
       - --concurrency
       - "1000"
       - --service-account
@@ -54,7 +73,7 @@ steps:
 
       # ingress config
       - --ingress
-      - all
+      - internal
 
       # sidecar 'otel-collector' config
       - --container

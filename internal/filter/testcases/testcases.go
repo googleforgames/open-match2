@@ -31,10 +31,21 @@ type TestCase struct {
 	Pool   *pb.Pool
 }
 
+var (
+	refStartTime = time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+	refMidTime   = time.Date(2024, 1, 1, 12, 30, 0, 0, time.UTC)
+	refEndTime   = time.Date(2024, 1, 1, 13, 0, 0, 0, time.UTC)
+)
+
 // IncludedTestCases returns a list of test cases where using the given filter,
 // the ticket is included in the result.
 func IncludedTestCases() []TestCase {
 	return []TestCase{
+		{
+			Name:   "no filters",
+			Ticket: &pb.Ticket{},
+			Pool:   &pb.Pool{},
+		},
 		simpleDoubleRange("simpleInRange", 5, 0, 10, pb.Pool_EXCLUDE_NONE),
 		simpleDoubleRange("simpleInRange", 5, 0, 10, pb.Pool_EXCLUDE_MIN),
 		simpleDoubleRange("simpleInRange", 5, 0, 10, pb.Pool_EXCLUDE_MAX),
@@ -119,6 +130,39 @@ func IncludedTestCases() []TestCase {
 			},
 		},
 
+		// Bounded CreationTimeRangeFilter cases (8 cases)
+		boundedCreationTimeRange("inRange", refMidTime, refStartTime, refEndTime, pb.Pool_EXCLUDE_NONE),
+		boundedCreationTimeRange("inRange", refMidTime, refStartTime, refEndTime, pb.Pool_EXCLUDE_START),
+		boundedCreationTimeRange("inRange", refMidTime, refStartTime, refEndTime, pb.Pool_EXCLUDE_END),
+		boundedCreationTimeRange("inRange", refMidTime, refStartTime, refEndTime, pb.Pool_EXCLUDE_BOTH),
+		boundedCreationTimeRange("atStartBoundary", refStartTime, refStartTime, refEndTime, pb.Pool_EXCLUDE_NONE),
+		boundedCreationTimeRange("atStartBoundary", refStartTime, refStartTime, refEndTime, pb.Pool_EXCLUDE_END),
+		boundedCreationTimeRange("atEndBoundary", refEndTime, refStartTime, refEndTime, pb.Pool_EXCLUDE_NONE),
+		boundedCreationTimeRange("atEndBoundary", refEndTime, refStartTime, refEndTime, pb.Pool_EXCLUDE_START),
+
+		// Start-only CreationTimeRangeFilter cases (End is nil, 6 cases)
+		openCreationTimeRange("startOnlyAfterStart", refMidTime, &refStartTime, nil, pb.Pool_EXCLUDE_NONE),
+		openCreationTimeRange("startOnlyAfterStart", refMidTime, &refStartTime, nil, pb.Pool_EXCLUDE_START),
+		openCreationTimeRange("startOnlyAfterStart", refMidTime, &refStartTime, nil, pb.Pool_EXCLUDE_END),
+		openCreationTimeRange("startOnlyAfterStart", refMidTime, &refStartTime, nil, pb.Pool_EXCLUDE_BOTH),
+		openCreationTimeRange("startOnlyAtStart", refStartTime, &refStartTime, nil, pb.Pool_EXCLUDE_NONE),
+		openCreationTimeRange("startOnlyAtStart", refStartTime, &refStartTime, nil, pb.Pool_EXCLUDE_END),
+
+		// End-only CreationTimeRangeFilter cases (Start is nil, 9 cases)
+		openCreationTimeRange("endOnlyBeforeEnd", refMidTime, nil, &refEndTime, pb.Pool_EXCLUDE_NONE),
+		openCreationTimeRange("endOnlyBeforeEnd", refMidTime, nil, &refEndTime, pb.Pool_EXCLUDE_START),
+		openCreationTimeRange("endOnlyBeforeEnd", refMidTime, nil, &refEndTime, pb.Pool_EXCLUDE_END),
+		openCreationTimeRange("endOnlyBeforeEnd", refMidTime, nil, &refEndTime, pb.Pool_EXCLUDE_BOTH),
+		openCreationTimeRange("endOnlyAtEnd", refEndTime, nil, &refEndTime, pb.Pool_EXCLUDE_NONE),
+		openCreationTimeRange("endOnlyAtEnd", refEndTime, nil, &refEndTime, pb.Pool_EXCLUDE_START),
+		openCreationTimeRange("endOnlyAtUnixEpoch", time.Unix(0, 0).UTC(), nil, &refEndTime, pb.Pool_EXCLUDE_START),
+		openCreationTimeRange("endOnlyAtUnixEpoch", time.Unix(0, 0).UTC(), nil, &refEndTime, pb.Pool_EXCLUDE_BOTH),
+		openCreationTimeRange("endOnlyBeforeUnixEpoch", time.Date(1969, 12, 31, 23, 59, 59, 0, time.UTC), nil, &refEndTime, pb.Pool_EXCLUDE_NONE),
+
+		// Open-ended CreationTimeRangeFilter cases (both Start and End nil, 2 cases)
+		openCreationTimeRange("bothBoundsNil", refMidTime, nil, nil, pb.Pool_EXCLUDE_NONE),
+		openCreationTimeRange("bothBoundsNil", refMidTime, nil, nil, pb.Pool_EXCLUDE_BOTH),
+
 		multipleFilters(true, true, true, true),
 	}
 }
@@ -161,6 +205,84 @@ func ExcludedTestCases() []TestCase {
 						Tag: "value",
 					},
 				},
+			},
+		},
+		{
+			"CreationTimeRange no FilterableData Attributes",
+			nil,
+			&pb.Pool{
+				CreationTimeRangeFilter: &pb.Pool_CreationTimeRangeFilter{
+					Start: timestamppb.New(refStartTime),
+					End:   timestamppb.New(refEndTime),
+				},
+			},
+		},
+		{
+			"CreationTimeRange nil ticket start only",
+			nil,
+			&pb.Pool{
+				CreationTimeRangeFilter: &pb.Pool_CreationTimeRangeFilter{
+					Start: timestamppb.New(refStartTime),
+				},
+			},
+		},
+		{
+			"CreationTimeRange nil ticket end only",
+			nil,
+			&pb.Pool{
+				CreationTimeRangeFilter: &pb.Pool_CreationTimeRangeFilter{
+					End: timestamppb.New(refEndTime),
+				},
+			},
+		},
+		{
+			"CreationTimeRange nil ticket both bounds nil",
+			nil,
+			&pb.Pool{
+				CreationTimeRangeFilter: &pb.Pool_CreationTimeRangeFilter{},
+			},
+		},
+		{
+			"CreationTimeRange nil CreationTime bounded",
+			&pb.Ticket{
+				Attributes: &pb.Ticket_FilterableData{},
+			},
+			&pb.Pool{
+				CreationTimeRangeFilter: &pb.Pool_CreationTimeRangeFilter{
+					Start: timestamppb.New(refStartTime),
+					End:   timestamppb.New(refEndTime),
+				},
+			},
+		},
+		{
+			"CreationTimeRange nil CreationTime start only",
+			&pb.Ticket{
+				Attributes: &pb.Ticket_FilterableData{},
+			},
+			&pb.Pool{
+				CreationTimeRangeFilter: &pb.Pool_CreationTimeRangeFilter{
+					Start: timestamppb.New(refStartTime),
+				},
+			},
+		},
+		{
+			"CreationTimeRange nil CreationTime end only",
+			&pb.Ticket{
+				Attributes: &pb.Ticket_FilterableData{},
+			},
+			&pb.Pool{
+				CreationTimeRangeFilter: &pb.Pool_CreationTimeRangeFilter{
+					End: timestamppb.New(refEndTime),
+				},
+			},
+		},
+		{
+			"CreationTimeRange nil CreationTime both bounds nil",
+			&pb.Ticket{
+				Attributes: &pb.Ticket_FilterableData{},
+			},
+			&pb.Pool{
+				CreationTimeRangeFilter: &pb.Pool_CreationTimeRangeFilter{},
 			},
 		},
 		{
@@ -318,6 +440,30 @@ func ExcludedTestCases() []TestCase {
 			},
 		},
 
+		// Bounded CreationTimeRangeFilter excluded cases (6 cases)
+		boundedCreationTimeRange("beforeStart", refStartTime.Add(-time.Minute), refStartTime, refEndTime, pb.Pool_EXCLUDE_NONE),
+		boundedCreationTimeRange("afterEnd", refEndTime.Add(time.Minute), refStartTime, refEndTime, pb.Pool_EXCLUDE_NONE),
+		boundedCreationTimeRange("atStartExcluded", refStartTime, refStartTime, refEndTime, pb.Pool_EXCLUDE_START),
+		boundedCreationTimeRange("atStartExcluded", refStartTime, refStartTime, refEndTime, pb.Pool_EXCLUDE_BOTH),
+		boundedCreationTimeRange("atEndExcluded", refEndTime, refStartTime, refEndTime, pb.Pool_EXCLUDE_END),
+		boundedCreationTimeRange("atEndExcluded", refEndTime, refStartTime, refEndTime, pb.Pool_EXCLUDE_BOTH),
+
+		// Start-only CreationTimeRangeFilter excluded cases (End is nil, 6 cases)
+		openCreationTimeRange("startOnlyBeforeStart", refStartTime.Add(-time.Minute), &refStartTime, nil, pb.Pool_EXCLUDE_NONE),
+		openCreationTimeRange("startOnlyBeforeStart", refStartTime.Add(-time.Minute), &refStartTime, nil, pb.Pool_EXCLUDE_START),
+		openCreationTimeRange("startOnlyBeforeStart", refStartTime.Add(-time.Minute), &refStartTime, nil, pb.Pool_EXCLUDE_END),
+		openCreationTimeRange("startOnlyBeforeStart", refStartTime.Add(-time.Minute), &refStartTime, nil, pb.Pool_EXCLUDE_BOTH),
+		openCreationTimeRange("startOnlyAtStartExcluded", refStartTime, &refStartTime, nil, pb.Pool_EXCLUDE_START),
+		openCreationTimeRange("startOnlyAtStartExcluded", refStartTime, &refStartTime, nil, pb.Pool_EXCLUDE_BOTH),
+
+		// End-only CreationTimeRangeFilter excluded cases (Start is nil, 6 cases)
+		openCreationTimeRange("endOnlyAfterEnd", refEndTime.Add(time.Minute), nil, &refEndTime, pb.Pool_EXCLUDE_NONE),
+		openCreationTimeRange("endOnlyAfterEnd", refEndTime.Add(time.Minute), nil, &refEndTime, pb.Pool_EXCLUDE_START),
+		openCreationTimeRange("endOnlyAfterEnd", refEndTime.Add(time.Minute), nil, &refEndTime, pb.Pool_EXCLUDE_END),
+		openCreationTimeRange("endOnlyAfterEnd", refEndTime.Add(time.Minute), nil, &refEndTime, pb.Pool_EXCLUDE_BOTH),
+		openCreationTimeRange("endOnlyAtEndExcluded", refEndTime, nil, &refEndTime, pb.Pool_EXCLUDE_END),
+		openCreationTimeRange("endOnlyAtEndExcluded", refEndTime, nil, &refEndTime, pb.Pool_EXCLUDE_BOTH),
+
 		multipleFilters(false, true, true, true),
 		multipleFilters(true, false, true, true),
 		multipleFilters(true, true, false, true),
@@ -327,7 +473,7 @@ func ExcludedTestCases() []TestCase {
 
 func simpleDoubleRange(name string, value, min, max float64, exclude pb.Pool_FilterBounds) TestCase {
 	return TestCase{
-		"Double range " + name,
+		fmt.Sprintf("Double range %s (val=%v, min=%v, max=%v, bounds=%s)", name, value, min, max, exclude),
 		&pb.Ticket{
 			Attributes: &pb.Ticket_FilterableData{
 				DoubleArgs: map[string]float64{
@@ -343,6 +489,35 @@ func simpleDoubleRange(name string, value, min, max float64, exclude pb.Pool_Fil
 					Maximum:   max,
 					Bounds:    exclude,
 				},
+			},
+		},
+	}
+}
+
+func boundedCreationTimeRange(name string, creationTime, start, end time.Time, bounds pb.Pool_FilterBounds) TestCase {
+	return openCreationTimeRange(name, creationTime, &start, &end, bounds)
+}
+
+func openCreationTimeRange(name string, creationTime time.Time, start, end *time.Time, bounds pb.Pool_FilterBounds) TestCase {
+	var startProto, endProto *timestamppb.Timestamp
+	if start != nil {
+		startProto = timestamppb.New(*start)
+	}
+	if end != nil {
+		endProto = timestamppb.New(*end)
+	}
+	return TestCase{
+		Name: fmt.Sprintf("CreationTimeRange %s (%s)", name, bounds),
+		Ticket: &pb.Ticket{
+			Attributes: &pb.Ticket_FilterableData{
+				CreationTime: timestamppb.New(creationTime),
+			},
+		},
+		Pool: &pb.Pool{
+			CreationTimeRangeFilter: &pb.Pool_CreationTimeRangeFilter{
+				Start:  startProto,
+				End:    endProto,
+				Bounds: bounds,
 			},
 		},
 	}

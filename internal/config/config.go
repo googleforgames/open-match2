@@ -23,6 +23,11 @@ import (
 	"github.com/spf13/viper"
 )
 
+var logger = logrus.WithFields(logrus.Fields{
+	"app":       "open_match",
+	"component": "internal.config",
+})
+
 // readConfig reads Open Match configuration from the environment.
 //
 // readConfig sets default config values, and configures Viper to read from the environment.
@@ -44,17 +49,16 @@ func Read() *viper.Viper {
 
 	// OTel metrics config.
 	cfg.SetDefault("OM_OTEL_SIDECAR", true)
+	cfg.SetDefault("OM_PROM_PORT", 2223)
 
-	// False: wait until all tickets in a match have had their deactivation
-	// saved to state storage before returning the match to the matchmaker.
-	// Slower results but (theoretically) fewer ticket collisions among
-	// matches.
-	// True (default): return the match to the matchmaker as soon as the mmf
-	// streams it to om-core. Deactivate tickets in the match after it has been
-	// successfully returned. Fastest results but possibly more ticket
-	// collisions if you have lots of mmfs running concurrently.
-	// TODO: validate this has the expected effect when using redis
+	// True (default): wait up to OM_MATCH_TICKET_DEACTIVATION_TIMEOUT_MS for all
+	// tickets in a match to have their deactivation replicated to the local cache
+	// before returning the match to the matchmaker (annotating the match's
+	// deactivation_timeout extension with boolean true on timeout or write failure).
+	// False: return the match to the matchmaker immediately as soon as the MMF
+	// streams it to om-core, and deactivate tickets in the match afterward.
 	cfg.SetDefault("OM_MATCH_TICKET_DEACTIVATION_WAIT", true)
+	cfg.SetDefault("OM_MATCH_TICKET_DEACTIVATION_TIMEOUT_MS", 60000)
 
 	// Maximum number of updates allowed in activate/deactivate/assignment gRPC requests.
 	// Must be a positive value that fits in a signed int32.
@@ -88,6 +92,9 @@ func Read() *viper.Viper {
 	cfg.SetDefault("OM_REDIS_POOL_MAX_IDLE", 500)
 	cfg.SetDefault("OM_REDIS_POOL_MAX_ACTIVE", 500)
 	cfg.SetDefault("OM_REDIS_POOL_IDLE_TIMEOUT", time.Minute)
+	cfg.SetDefault("OM_REDIS_DIAL_CONNECT_TIMEOUT", 5*time.Second)
+	cfg.SetDefault("OM_REDIS_DIAL_READ_TIMEOUT", 10*time.Second)
+	cfg.SetDefault("OM_REDIS_DIAL_WRITE_TIMEOUT", 5*time.Second)
 
 	// Enable TLS for Redis connections.  Cannot be controlled independently on
 	// a per-instance basis; it is either on for the write host and all read
@@ -127,12 +134,22 @@ func Read() *viper.Viper {
 	// replicated to all other instances (i.e. writing to state storage)
 	cfg.SetDefault("OM_CACHE_IN_MAX_UPDATES_PER_POLL", 10000)            // In number of update operations
 	cfg.SetDefault("OM_CACHE_IN_WAIT_TIMEOUT_MS", 1500)                  // In milliseconds
+	cfg.SetDefault("OM_CACHE_IN_POLL_WAIT_MS", 250)                      // In milliseconds
+	cfg.SetDefault("OM_CACHE_IN_FULL_POLL_WAIT_MS", 100)                 // In milliseconds
+	cfg.SetDefault("OM_CACHE_IN_QUEUE_BUFFER_SIZE", 20000)               // Buffer size for incoming updates channel
 	cfg.SetDefault("OM_CACHE_IN_SLEEP_BETWEEN_APPLYING_UPDATES_MS", 500) // In milliseconds
+	cfg.SetDefault("OM_CACHE_IN_FULL_APPLY_SLEEP_MS", 100)               // In milliseconds
+	cfg.SetDefault("OM_CACHE_IN_MAX_APPLY_DURATION_MS", 500)             // In milliseconds
 	cfg.SetDefault("OM_CACHE_OUT_MAX_QUEUE_THRESHOLD", 50)               // In number of update operations
 	cfg.SetDefault("OM_CACHE_OUT_WAIT_TIMEOUT_MS", 500)                  // In milliseconds
+	cfg.SetDefault("OM_CACHE_OUT_QUEUE_BUFFER_SIZE", 500)                // Buffer size for outgoing updates channel
+	cfg.SetDefault("OM_CACHE_PACK_TICKET_STATE_UPDATES", false)          // Enable packing ticket state updates
+	cfg.SetDefault("OM_CACHE_OUT_MAX_PACKED_KEYS", 500)                  // Max keys packed into a single state update
 	cfg.SetDefault("OM_CACHE_TICKET_TTL_MS", 600000)                     // In milliseconds
 	// How long assignments will be retained AFTER ticket expiration
 	cfg.SetDefault("OM_CACHE_ASSIGNMENT_ADDITIONAL_TTL_MS", 600000) // DEPRECATED In milliseconds
+	cfg.SetDefault("OM_CACHE_EXPIRATION_INTERVAL_MS", 1000)         // In milliseconds
+	cfg.SetDefault("OM_CACHE_EXPIRATION_MAX_DELETES_PER_CYCLE", 5000)
 
 	// knative env vars https://cloud.google.com/run/docs/container-contract#env-vars
 	cfg.SetDefault("PORT", 8080)
@@ -148,15 +165,33 @@ func Read() *viper.Viper {
 	// Override default values with those from the environment variables of the same name.
 	cfg.AutomaticEnv()
 
+	positiveIntDefaults := []struct {
+		key          string
+		defaultValue int
+	}{
+		{"OM_CACHE_EXPIRATION_INTERVAL_MS", 1000},
+		{"OM_CACHE_IN_MAX_APPLY_DURATION_MS", 500},
+		{"OM_CACHE_EXPIRATION_MAX_DELETES_PER_CYCLE", 5000},
+		{"OM_CACHE_IN_QUEUE_BUFFER_SIZE", 20000},
+		{"OM_CACHE_OUT_QUEUE_BUFFER_SIZE", 500},
+		{"OM_CACHE_OUT_MAX_PACKED_KEYS", 500},
+		{"OM_MATCH_TICKET_DEACTIVATION_TIMEOUT_MS", 60000},
+		{"OM_CACHE_IN_MAX_UPDATES_PER_POLL", 10000},
+		{"OM_MAX_STATE_UPDATES_PER_CALL", 500},
+	}
+	for _, item := range positiveIntDefaults {
+		if val := cfg.GetInt(item.key); val <= 0 {
+			logger.Warnf("%s must be > 0 (got %d); resetting to default %d", item.key, val, item.defaultValue)
+			cfg.Set(item.key, item.defaultValue)
+		}
+	}
+
 	return cfg
 }
 
 // LogConfig is a convenience function to output all config settings to the log.
 func LogConfig(cfg *viper.Viper) {
 	for key, value := range cfg.AllSettings() {
-		logrus.WithFields(logrus.Fields{
-			"app":       "open_match",
-			"component": "internal.config",
-		}).Debugf(" CONFIG %v: %v", key, value)
+		logger.Debugf(" CONFIG %v: %v", key, value)
 	}
 }

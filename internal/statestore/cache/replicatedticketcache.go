@@ -768,8 +768,16 @@ func (tc *ReplicatedTicketCache) IncomingReplicationQueue(ctx context.Context) {
 		catchUpTarget int64 = -1
 	)
 
+	// Join both internal helper goroutines before IncomingReplicationQueue returns:
+	// once this function returns, nothing it started may call tc.Replicator (which
+	// callers close next during shutdown) or record OpenTelemetry metrics.
+	var workerWg sync.WaitGroup
+	defer workerWg.Wait()
+
 	// Storage poller goroutine.
+	workerWg.Add(1)
 	go func() {
+		defer workerWg.Done()
 		for {
 			if ctx.Err() != nil {
 				return
@@ -886,7 +894,9 @@ func (tc *ReplicatedTicketCache) IncomingReplicationQueue(ctx context.Context) {
 
 	// Asynchronous cache expiration ticker goroutine.
 	expIntervalMs := tc.cfgPositiveIntOrDefault("OM_CACHE_EXPIRATION_INTERVAL_MS", 1000)
+	workerWg.Add(1)
 	go func() {
+		defer workerWg.Done()
 		ticker := time.NewTicker(time.Duration(expIntervalMs) * time.Millisecond)
 		defer ticker.Stop()
 		for {
@@ -1074,36 +1084,53 @@ func (tc *ReplicatedTicketCache) applyIncomingUpdate(logger *logrus.Entry, curUp
 			return
 		}
 
+		replId := curUpdate.ReplId
+		if replId == "" {
+			replId = id
+		}
+		creationMs, err := store.ParseReplIdTimestampMs(replId)
+		if err != nil {
+			if creationMs, err = store.ParseReplIdTimestampMs(id); err != nil {
+				creationMs = time.Now().UnixMilli()
+			}
+		}
+
 		tc.stateMu.Lock()
+		if tc.inInactiveHeap == nil {
+			tc.inInactiveHeap = make(map[string]struct{})
+		}
 		_, existedInTickets := tc.Tickets.Load(id)
 		tc.Tickets.Store(id, ticketPb)
 		if !existedInTickets {
 			tc.liveTickets++
 		}
 
-		if _, inInactive := tc.InactiveSet.Load(id); !inInactive {
-			_, existedInActive := tc.ActiveTickets.Load(id)
+		// Tickets start inactive on creation and enter ActiveTickets only via Activate.
+		// If id is already in ActiveTickets (a late duplicate creation event), only
+		// replace the stored ticket object without changing state or counters.
+		if _, alreadyActive := tc.ActiveTickets.Load(id); alreadyActive {
 			tc.ActiveTickets.Store(id, ticketPb)
-			if !existedInActive {
-				tc.liveActive++
+		} else {
+			if _, wasInactive := tc.InactiveSet.LoadOrStore(id, true); !wasInactive {
+				tc.liveInactive++
 			}
-		} else if _, existedInActive := tc.ActiveTickets.LoadAndDelete(id); existedInActive {
-			tc.liveActive--
-		}
-
-		creationMs, err := store.ParseReplIdTimestampMs(id)
-		if err != nil {
-			creationMs = time.Now().UnixMilli()
-		}
-		if expTs := ticketPb.GetExpirationTime(); expTs != nil && expTs.IsValid() {
-			expMs := expTs.AsTime().UnixMilli()
-			ttlMs := int64(tc.cfgIntOrDefault("OM_CACHE_TICKET_TTL_MS", 600000))
-			if expMs < creationMs+ttlMs {
-				heap.Push(&tc.ticketExpHeap, expirationHeapEntry{
+			if _, inHeap := tc.inInactiveHeap[id]; !inHeap {
+				tc.inInactiveHeap[id] = struct{}{}
+				heap.Push(&tc.inactiveHeap, expirationHeapEntry{
 					id:         id,
-					deadlineMs: expMs,
+					deadlineMs: creationMs,
 				})
 			}
+		}
+
+		// Always push valid expiration timestamps onto ticketExpHeap: the replication ID
+		// comes from the state-storage clock and the default expiration from the om-core
+		// clock, so they cannot be compared, and the expiry pass re-checks before evicting.
+		if expTs := ticketPb.GetExpirationTime(); expTs != nil && expTs.IsValid() {
+			heap.Push(&tc.ticketExpHeap, expirationHeapEntry{
+				id:         id,
+				deadlineMs: expTs.AsTime().UnixMilli(),
+			})
 		}
 		tc.updateGaugeCountsLocked()
 		tc.stateMu.Unlock()
@@ -1250,7 +1277,7 @@ func (tc *ReplicatedTicketCache) expireCacheEntries(ctx context.Context) {
 			}
 		}
 
-		// Pass 2: Expire tickets with custom ExpirationTime at or before nowMs.
+		// Pass 2: Expire active and inactive tickets whose ExpirationTime is at or before nowMs.
 		for tc.ticketExpHeap.Len() > 0 &&
 			tc.ticketExpHeap[0].deadlineMs <= nowMs &&
 			chunkOps < expirationChunkOpsLimit &&
@@ -1268,6 +1295,10 @@ func (tc *ReplicatedTicketCache) expireCacheEntries(ctx context.Context) {
 					if _, wasInTickets := tc.Tickets.LoadAndDelete(entry.id); wasInTickets {
 						tc.liveTickets--
 						numTicketDeletions++
+					}
+					if _, wasInInactive := tc.InactiveSet.LoadAndDelete(entry.id); wasInInactive {
+						tc.liveInactive--
+						numInactiveDeletions++
 					}
 					totalDeleted++
 				}

@@ -240,6 +240,25 @@ func baselineSetDifference(tc *ReplicatedTicketCache) map[any]any {
 	return diff
 }
 
+func startTestQueues(tb testing.TB, queues ...func(context.Context)) context.Context {
+	tb.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	for _, q := range queues {
+		qFn := q
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			qFn(ctx)
+		}()
+	}
+	tb.Cleanup(func() {
+		cancel()
+		wg.Wait()
+	})
+	return ctx
+}
+
 // 1. Deactivation Watermark and InactiveSet Wakeup
 func TestDeactivationWatermarkAndInactiveSetWakeup(t *testing.T) {
 	cfg := newFastTestConfig()
@@ -317,11 +336,7 @@ func TestEndToEndMemoryReplicationWatermark(t *testing.T) {
 	memRep := memoryReplicator.New(cfg)
 	tc := New(cfg, memRep)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	go tc.OutgoingReplicationQueue(ctx)
-	go tc.IncomingReplicationQueue(ctx)
+	ctx := startTestQueues(t, tc.OutgoingReplicationQueue, tc.IncomingReplicationQueue)
 
 	// Create a ticket through OutgoingReplicationQueue.
 	createResChan := make(chan *store.StateResponse, 1)
@@ -404,9 +419,7 @@ func TestFullPollAdaptiveWait(t *testing.T) {
 	}
 	tc := New(cfg, fakeRep)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go tc.IncomingReplicationQueue(ctx)
+	startTestQueues(t, tc.IncomingReplicationQueue)
 
 	// Wait until at least 2 polls have completed.
 	for {
@@ -450,9 +463,7 @@ func TestPartialPollAdaptiveWait(t *testing.T) {
 	}
 	tc := New(cfg, fakeRep)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go tc.IncomingReplicationQueue(ctx)
+	startTestQueues(t, tc.IncomingReplicationQueue)
 
 	for {
 		select {
@@ -482,9 +493,7 @@ func TestEarlyEmptyPollThrottling(t *testing.T) {
 	}
 	tc := New(cfg, fakeRep)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go tc.IncomingReplicationQueue(ctx)
+	startTestQueues(t, tc.IncomingReplicationQueue)
 
 	for {
 		select {
@@ -509,11 +518,7 @@ func TestPackedTicketStateUpdates(t *testing.T) {
 	memRep := memoryReplicator.New(cfg)
 	tc := New(cfg, memRep)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	go tc.OutgoingReplicationQueue(ctx)
-	go tc.IncomingReplicationQueue(ctx)
+	ctx := startTestQueues(t, tc.OutgoingReplicationQueue, tc.IncomingReplicationQueue)
 
 	ticketPayload := marshalTestTicket(t, nil)
 	ticketIds := make([]string, 4)
@@ -532,8 +537,27 @@ func TestPackedTicketStateUpdates(t *testing.T) {
 		lastCreateReplId = resp.Result
 	}
 	require.True(t, tc.WaitForDeactivation("", lastCreateReplId, 2*time.Second))
+	assert.Empty(t, tc.SnapshotActiveTickets())
+	assert.Equal(t, int64(0), tc.ActiveCount())
+	assert.Equal(t, int64(4), tc.InactiveCount())
+
+	// Packed Activate for all 4 created tickets.
+	initActCh := make(chan *store.StateResponse, 1)
+	tc.UpRequests <- &UpdateRequest{
+		Ctx:         ctx,
+		ResultsChan: initActCh,
+		EnqueuedAt:  time.Now(),
+		Update: store.StateUpdate{
+			Cmd:  store.Activate,
+			Keys: ticketIds,
+		},
+	}
+	initActResp := <-initActCh
+	require.NoError(t, initActResp.Err)
+	require.True(t, tc.WaitForDeactivation("", initActResp.Result, 2*time.Second))
 	assert.Len(t, tc.SnapshotActiveTickets(), 4)
 	assert.Equal(t, int64(4), tc.ActiveCount())
+	assert.Equal(t, int64(0), tc.InactiveCount())
 
 	// Packed Deactivate for first 3 tickets.
 	deactCh := make(chan *store.StateResponse, 1)
@@ -657,18 +681,16 @@ func TestOutgoingRequestCoalescingRules(t *testing.T) {
 		spy := &spyReplicator{base: memRep}
 		tc := New(cfg, spy)
 
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-
+		reqCtx := context.Background()
 		ch1 := make(chan *store.StateResponse, 1)
 		chEmpty := make(chan *store.StateResponse, 1)
 		ch2 := make(chan *store.StateResponse, 1)
 
-		tc.UpRequests <- &UpdateRequest{Ctx: ctx, ResultsChan: ch1, Update: store.StateUpdate{Cmd: store.Deactivate, Key: "valid-1"}}
-		tc.UpRequests <- &UpdateRequest{Ctx: ctx, ResultsChan: chEmpty, Update: store.StateUpdate{Cmd: store.Deactivate, Key: "", Keys: []string{"", ""}}}
-		tc.UpRequests <- &UpdateRequest{Ctx: ctx, ResultsChan: ch2, Update: store.StateUpdate{Cmd: store.Deactivate, Key: "valid-2"}}
+		tc.UpRequests <- &UpdateRequest{Ctx: reqCtx, ResultsChan: ch1, Update: store.StateUpdate{Cmd: store.Deactivate, Key: "valid-1"}}
+		tc.UpRequests <- &UpdateRequest{Ctx: reqCtx, ResultsChan: chEmpty, Update: store.StateUpdate{Cmd: store.Deactivate, Key: "", Keys: []string{"", ""}}}
+		tc.UpRequests <- &UpdateRequest{Ctx: reqCtx, ResultsChan: ch2, Update: store.StateUpdate{Cmd: store.Deactivate, Key: "valid-2"}}
 
-		go tc.OutgoingReplicationQueue(ctx)
+		startTestQueues(t, tc.OutgoingReplicationQueue)
 
 		r1 := <-ch1
 		rEmpty := <-chEmpty
@@ -717,10 +739,7 @@ func TestCrossCallerOutgoingCoalescing(t *testing.T) {
 	spy := &spyReplicator{base: memRep}
 	tc := New(cfg, spy)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	go tc.OutgoingReplicationQueue(ctx)
+	ctx := startTestQueues(t, tc.OutgoingReplicationQueue)
 
 	results := make([]*store.StateResponse, numCallers)
 	var wg sync.WaitGroup
@@ -784,6 +803,16 @@ func TestMaterializedActiveTicketsEquivalence(t *testing.T) {
 		Cmd:   store.Ticket,
 		Key:   t4CustomExpId,
 		Value: marshalTestTicket(t, timestamppb.New(time.UnixMilli(nowMs-500))),
+	})
+	assert.Empty(t, tc.SnapshotActiveTickets())
+	assert.Equal(t, int64(4), tc.InactiveCount())
+	assert.Equal(t, baselineSetDifference(tc), tc.SnapshotActiveTickets())
+	assert.Equal(t, int64(len(tc.SnapshotActiveTickets())), tc.ActiveCount())
+
+	// Activate all four created tickets with one packed activation.
+	tc.applyIncomingUpdate(logger, store.StateUpdate{
+		Cmd:  store.Activate,
+		Keys: []string{expiredId, t2Id, t3Id, t4CustomExpId},
 	})
 	assert.Equal(t, baselineSetDifference(tc), tc.SnapshotActiveTickets())
 	assert.Equal(t, int64(len(tc.SnapshotActiveTickets())), tc.ActiveCount())
@@ -852,6 +881,7 @@ func TestMinHeapExpirationOrderingSafetyIdempotencyAndChunkBounds(t *testing.T) 
 			Key:   customExpActiveId,
 			Value: marshalTestTicket(t, timestamppb.New(time.UnixMilli(nowMs-500))),
 		})
+		tc.applyIncomingUpdate(logger, store.StateUpdate{Cmd: store.Activate, Key: customExpActiveId})
 
 		// Deactivate out of creation-timestamp order: fresh ticket first, then older expired tickets.
 		tc.applyIncomingUpdate(logger, store.StateUpdate{Cmd: store.Deactivate, Key: freshInactiveId})
@@ -902,7 +932,15 @@ func TestMinHeapExpirationOrderingSafetyIdempotencyAndChunkBounds(t *testing.T) 
 		tc.applyIncomingUpdate(logger, store.StateUpdate{Cmd: store.Ticket, Key: id, Value: payload})
 		tc.applyIncomingUpdate(logger, store.StateUpdate{Cmd: store.Ticket, Key: id, Value: payload})
 		assert.Equal(t, int64(1), tc.TicketCount())
+		assert.Equal(t, int64(0), tc.ActiveCount())
+		assert.Equal(t, int64(1), tc.InactiveCount())
+
+		// Activate and apply a late duplicate creation event.
+		tc.applyIncomingUpdate(logger, store.StateUpdate{Cmd: store.Activate, Key: id})
+		tc.applyIncomingUpdate(logger, store.StateUpdate{Cmd: store.Ticket, Key: id, Value: payload})
+		assert.Equal(t, int64(1), tc.TicketCount())
 		assert.Equal(t, int64(1), tc.ActiveCount())
+		assert.Equal(t, int64(0), tc.InactiveCount())
 
 		// Duplicate deactivate updates.
 		tc.applyIncomingUpdate(logger, store.StateUpdate{Cmd: store.Deactivate, Key: id})
@@ -992,9 +1030,7 @@ func TestDefensiveOutgoingResultSynthesis(t *testing.T) {
 		}
 		tc := New(cfg, rep)
 
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		go tc.OutgoingReplicationQueue(ctx)
+		ctx := startTestQueues(t, tc.OutgoingReplicationQueue)
 
 		resCh := make(chan *store.StateResponse, 1)
 		tc.UpRequests <- &UpdateRequest{
@@ -1021,15 +1057,13 @@ func TestDefensiveOutgoingResultSynthesis(t *testing.T) {
 		}
 		tc := New(cfg, rep)
 
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-
+		reqCtx := context.Background()
 		ch1 := make(chan *store.StateResponse, 1)
 		ch2 := make(chan *store.StateResponse, 1)
-		tc.UpRequests <- &UpdateRequest{Ctx: ctx, ResultsChan: ch1, Update: store.StateUpdate{Cmd: store.Deactivate, Key: "t-unpacked-1"}}
-		tc.UpRequests <- &UpdateRequest{Ctx: ctx, ResultsChan: ch2, Update: store.StateUpdate{Cmd: store.Deactivate, Key: "t-unpacked-2"}}
+		tc.UpRequests <- &UpdateRequest{Ctx: reqCtx, ResultsChan: ch1, Update: store.StateUpdate{Cmd: store.Deactivate, Key: "t-unpacked-1"}}
+		tc.UpRequests <- &UpdateRequest{Ctx: reqCtx, ResultsChan: ch2, Update: store.StateUpdate{Cmd: store.Deactivate, Key: "t-unpacked-2"}}
 
-		go tc.OutgoingReplicationQueue(ctx)
+		startTestQueues(t, tc.OutgoingReplicationQueue)
 
 		r1 := <-ch1
 		r2 := <-ch2
@@ -1053,15 +1087,13 @@ func TestDefensiveOutgoingResultSynthesis(t *testing.T) {
 		}
 		tc := New(cfg, rep)
 
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-
+		reqCtx := context.Background()
 		ch1 := make(chan *store.StateResponse, 1)
 		ch2 := make(chan *store.StateResponse, 1)
-		tc.UpRequests <- &UpdateRequest{Ctx: ctx, ResultsChan: ch1, Update: store.StateUpdate{Cmd: store.Deactivate, Key: "t-packed-nil-1"}}
-		tc.UpRequests <- &UpdateRequest{Ctx: ctx, ResultsChan: ch2, Update: store.StateUpdate{Cmd: store.Deactivate, Key: "t-packed-nil-2"}}
+		tc.UpRequests <- &UpdateRequest{Ctx: reqCtx, ResultsChan: ch1, Update: store.StateUpdate{Cmd: store.Deactivate, Key: "t-packed-nil-1"}}
+		tc.UpRequests <- &UpdateRequest{Ctx: reqCtx, ResultsChan: ch2, Update: store.StateUpdate{Cmd: store.Deactivate, Key: "t-packed-nil-2"}}
 
-		go tc.OutgoingReplicationQueue(ctx)
+		startTestQueues(t, tc.OutgoingReplicationQueue)
 
 		r1 := <-ch1
 		r2 := <-ch2
@@ -1088,15 +1120,13 @@ func TestDefensiveOutgoingResultSynthesis(t *testing.T) {
 		}
 		tc := New(cfg, rep)
 
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-
+		reqCtx := context.Background()
 		ch1 := make(chan *store.StateResponse, 1)
 		ch2 := make(chan *store.StateResponse, 1)
-		tc.UpRequests <- &UpdateRequest{Ctx: ctx, ResultsChan: ch1, Update: store.StateUpdate{Cmd: store.Deactivate, Key: "t-packed-few-1"}}
-		tc.UpRequests <- &UpdateRequest{Ctx: ctx, ResultsChan: ch2, Update: store.StateUpdate{Cmd: store.Deactivate, Key: "t-packed-few-2"}}
+		tc.UpRequests <- &UpdateRequest{Ctx: reqCtx, ResultsChan: ch1, Update: store.StateUpdate{Cmd: store.Deactivate, Key: "t-packed-few-1"}}
+		tc.UpRequests <- &UpdateRequest{Ctx: reqCtx, ResultsChan: ch2, Update: store.StateUpdate{Cmd: store.Deactivate, Key: "t-packed-few-2"}}
 
-		go tc.OutgoingReplicationQueue(ctx)
+		startTestQueues(t, tc.OutgoingReplicationQueue)
 
 		r1 := <-ch1
 		r2 := <-ch2
@@ -1130,7 +1160,7 @@ func TestActiveTicketGaugeAccuracyAndPerInstanceIsolation(t *testing.T) {
 		assert.Equal(t, int64(0), tc.ActiveCount())
 		assert.Equal(t, int64(0), atomic.LoadInt64(&ActiveCount))
 
-		// Create 2 active tickets; ActiveCount must be 2 (not 2 - 5 = -3).
+		// Create 2 tickets (starting inactive on top of the 5 pre-deactivated IDs).
 		for i := 10; i < 12; i++ {
 			tc.applyIncomingUpdate(logger, store.StateUpdate{
 				Cmd:   store.Ticket,
@@ -1139,8 +1169,19 @@ func TestActiveTicketGaugeAccuracyAndPerInstanceIsolation(t *testing.T) {
 			})
 		}
 		assert.Equal(t, int64(2), tc.TicketCount())
+		assert.Equal(t, int64(7), tc.InactiveCount())
+		assert.Equal(t, int64(0), tc.ActiveCount())
+		assert.Equal(t, int64(0), atomic.LoadInt64(&ActiveCount))
+
+		// Activate both created tickets; ActiveCount must be 2 (not 2 - 5 = -3).
+		tc.applyIncomingUpdate(logger, store.StateUpdate{
+			Cmd:  store.Activate,
+			Keys: []string{"1700000000000-10", "1700000000000-11"},
+		})
+		assert.Equal(t, int64(2), tc.TicketCount())
 		assert.Equal(t, int64(5), tc.InactiveCount())
 		assert.Equal(t, int64(2), tc.ActiveCount())
+		assert.Equal(t, int64(2), atomic.LoadInt64(&ActiveCount))
 	})
 
 	t.Run("gauges_update_immediately_on_apply", func(t *testing.T) {
@@ -1149,10 +1190,18 @@ func TestActiveTicketGaugeAccuracyAndPerInstanceIsolation(t *testing.T) {
 
 		id := "1700000000100-1"
 		tc.applyIncomingUpdate(logger, store.StateUpdate{Cmd: store.Ticket, Key: id, Value: marshalTestTicket(t, nil)})
-		assert.Equal(t, int64(1), tc.ActiveCount())
+		assert.Equal(t, int64(0), tc.ActiveCount())
+		assert.Equal(t, int64(1), tc.InactiveCount())
 		assert.Equal(t, int64(1), tc.TicketCount())
-		assert.Equal(t, int64(1), atomic.LoadInt64(&ActiveCount))
+		assert.Equal(t, int64(0), atomic.LoadInt64(&ActiveCount))
+		assert.Equal(t, int64(1), atomic.LoadInt64(&InactiveCount))
 		assert.Equal(t, int64(1), atomic.LoadInt64(&TicketCount))
+
+		tc.applyIncomingUpdate(logger, store.StateUpdate{Cmd: store.Activate, Key: id})
+		assert.Equal(t, int64(1), tc.ActiveCount())
+		assert.Equal(t, int64(0), tc.InactiveCount())
+		assert.Equal(t, int64(1), atomic.LoadInt64(&ActiveCount))
+		assert.Equal(t, int64(0), atomic.LoadInt64(&InactiveCount))
 
 		tc.applyIncomingUpdate(logger, store.StateUpdate{Cmd: store.Deactivate, Key: id})
 		assert.Equal(t, int64(0), tc.ActiveCount())
@@ -1167,10 +1216,9 @@ func TestActiveTicketGaugeAccuracyAndPerInstanceIsolation(t *testing.T) {
 		assert.Equal(t, int64(1), atomic.LoadInt64(&AssignmentCount))
 	})
 
-	t.Run("per_instance_register_metrics_isolation", func(t *testing.T) {
-		// Allow any background poller timers from prior subtests to exit before re-binding metric globals.
-		time.Sleep(50 * time.Millisecond)
-
+	t.Run("per_instance_gauge_callbacks_with_package_level_instruments", func(t *testing.T) {
+		// Only observable gauge callbacks are bound per ReplicatedTicketCache instance;
+		// the OpenTelemetry metric instruments themselves are package-level globals.
 		cfg := newFastTestConfig()
 		tc1 := New(cfg, nil)
 		tc2 := New(cfg, nil)
@@ -1185,7 +1233,7 @@ func TestActiveTicketGaugeAccuracyAndPerInstanceIsolation(t *testing.T) {
 		m2 := mp2.Meter("cache-instance-2")
 		tc2.RegisterMetrics(&m2)
 
-		// Populate tc1 with 3 active tickets and 1 inactive ticket.
+		// Populate tc1 with 4 tickets and activate 3 (3 active, 1 inactive).
 		for i := 0; i < 4; i++ {
 			tc1.applyIncomingUpdate(logger, store.StateUpdate{
 				Cmd:   store.Ticket,
@@ -1193,9 +1241,12 @@ func TestActiveTicketGaugeAccuracyAndPerInstanceIsolation(t *testing.T) {
 				Value: marshalTestTicket(t, nil),
 			})
 		}
-		tc1.applyIncomingUpdate(logger, store.StateUpdate{Cmd: store.Deactivate, Key: "1700000001000-0"})
+		tc1.applyIncomingUpdate(logger, store.StateUpdate{
+			Cmd:  store.Activate,
+			Keys: []string{"1700000001000-1", "1700000001000-2", "1700000001000-3"},
+		})
 
-		// Populate tc2 with 1 active ticket and 2 inactive tickets (mutating globals after tc1).
+		// Populate tc2 with 3 tickets and activate 1 (1 active, 2 inactive; mutating globals after tc1).
 		for i := 0; i < 3; i++ {
 			tc2.applyIncomingUpdate(logger, store.StateUpdate{
 				Cmd:   store.Ticket,
@@ -1204,8 +1255,8 @@ func TestActiveTicketGaugeAccuracyAndPerInstanceIsolation(t *testing.T) {
 			})
 		}
 		tc2.applyIncomingUpdate(logger, store.StateUpdate{
-			Cmd:  store.Deactivate,
-			Keys: []string{"1700000002000-0", "1700000002000-1"},
+			Cmd: store.Activate,
+			Key: "1700000002000-2",
 		})
 
 		// Re-registering package metrics on testMeter keeps global testMeter bound for later tests.
@@ -1396,9 +1447,7 @@ func TestColdStartInitialCatchUpBarrier(t *testing.T) {
 		tc := New(cfg, fakeRep)
 		assert.False(t, tc.IsCaughtUp())
 
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		go tc.IncomingReplicationQueue(ctx)
+		ctx := startTestQueues(t, tc.IncomingReplicationQueue)
 
 		waitCtx, waitCancel := context.WithTimeout(ctx, 500*time.Millisecond)
 		defer waitCancel()
@@ -1451,8 +1500,10 @@ func TestColdStartInitialCatchUpBarrier(t *testing.T) {
 
 		assert.Less(t, elapsed, 500*time.Millisecond, "catchUpWake must wake applier without waiting 5000ms")
 		assert.True(t, tc.IsCaughtUp())
-		assert.Equal(t, int64(7), tc.ActiveCount())
-		assert.Len(t, tc.SnapshotActiveTickets(), 7)
+		assert.Equal(t, int64(7), tc.TicketCount())
+		assert.Equal(t, int64(7), tc.InactiveCount())
+		assert.Equal(t, int64(0), tc.ActiveCount())
+		assert.Empty(t, tc.SnapshotActiveTickets())
 	})
 
 	t.Run("wait_for_catch_up_context_cancellation", func(t *testing.T) {
@@ -1549,4 +1600,171 @@ func TestSubMillisecondHistogramBucketBoundaries(t *testing.T) {
 		assert.GreaterOrEqual(t, dp.BucketCounts[2]-beforeBucket2[histName], uint64(1),
 			"histogram %s must record 0.15ms into bucket (0.1, 0.25]", histName)
 	}
+}
+
+// 16. Regression: Tickets Begin Inactive Until Activated
+func TestTicketsBeginInactiveUntilActivated(t *testing.T) {
+	const (
+		totalTickets  = 200
+		activatedHalf = 100
+	)
+
+	cfg := newFastTestConfig()
+	memRep := memoryReplicator.New(cfg)
+	tc := New(cfg, memRep)
+	ctx := startTestQueues(t, tc.OutgoingReplicationQueue, tc.IncomingReplicationQueue)
+
+	payload := marshalTestTicket(t, nil)
+	ids := make([]string, totalTickets)
+	var lastCreateReplId string
+	for i := 0; i < totalTickets; i++ {
+		resCh := make(chan *store.StateResponse, 1)
+		tc.UpRequests <- &UpdateRequest{
+			Ctx:         ctx,
+			ResultsChan: resCh,
+			EnqueuedAt:  time.Now(),
+			Update:      store.StateUpdate{Cmd: store.Ticket, Value: payload},
+		}
+		resp := <-resCh
+		require.NotNil(t, resp)
+		require.NoError(t, resp.Err)
+		ids[i] = resp.Result
+		lastCreateReplId = resp.Result
+	}
+	require.True(t, tc.WaitForDeactivation("", lastCreateReplId, 2*time.Second))
+
+	assert.Empty(t, tc.SnapshotActiveTickets())
+	assert.Equal(t, int64(totalTickets), tc.TicketCount())
+	assert.Equal(t, int64(totalTickets), tc.InactiveCount())
+	assert.Equal(t, int64(0), tc.ActiveCount())
+
+	var lastActReplId string
+	for i := 0; i < activatedHalf; i++ {
+		resCh := make(chan *store.StateResponse, 1)
+		tc.UpRequests <- &UpdateRequest{
+			Ctx:         ctx,
+			ResultsChan: resCh,
+			EnqueuedAt:  time.Now(),
+			Update:      store.StateUpdate{Cmd: store.Activate, Key: ids[i]},
+		}
+		resp := <-resCh
+		require.NotNil(t, resp)
+		require.NoError(t, resp.Err)
+		lastActReplId = resp.Result
+	}
+	require.True(t, tc.WaitForDeactivation("", lastActReplId, 2*time.Second))
+
+	snap := tc.SnapshotActiveTickets()
+	assert.Len(t, snap, activatedHalf)
+	for i := 0; i < activatedHalf; i++ {
+		assert.Contains(t, snap, ids[i])
+	}
+	for i := activatedHalf; i < totalTickets; i++ {
+		assert.NotContains(t, snap, ids[i])
+	}
+	assert.Equal(t, int64(activatedHalf), tc.ActiveCount())
+	assert.Equal(t, int64(totalTickets-activatedHalf), tc.InactiveCount())
+	assert.Equal(t, int64(totalTickets), tc.TicketCount())
+}
+
+// 17. Regression: Active Tickets Expire Regardless of Clock Skew
+func TestActiveTicketsExpireRegardlessOfClockSkew(t *testing.T) {
+	cfg := newFastTestConfig()
+	cfg.Set("OM_CACHE_TICKET_TTL_MS", 1000)
+	tc := New(cfg, nil)
+
+	now := time.Now()
+	nowMs := now.UnixMilli()
+	replMs := nowMs - 5000 // R = now - 5s
+	ttlMs := int64(1000)
+
+	idA := fmt.Sprintf("%013d-1", replMs)
+	idB := fmt.Sprintf("%013d-2", replMs)
+	idC := fmt.Sprintf("%013d-3", nowMs)
+
+	// Ticket A: expiration exactly R + TTL (now - 4s).
+	tc.applyIncomingUpdate(logger, store.StateUpdate{
+		Cmd:    store.Ticket,
+		Key:    idA,
+		ReplId: idA,
+		Value:  marshalTestTicket(t, timestamppb.New(time.UnixMilli(replMs+ttlMs))),
+	})
+	// Ticket B: expiration R + TTL + 1s (now - 3s).
+	tc.applyIncomingUpdate(logger, store.StateUpdate{
+		Cmd:    store.Ticket,
+		Key:    idB,
+		ReplId: idB,
+		Value:  marshalTestTicket(t, timestamppb.New(time.UnixMilli(replMs+ttlMs+1000))),
+	})
+	// Control C: replication timestamp now, expiration now + 60s.
+	tc.applyIncomingUpdate(logger, store.StateUpdate{
+		Cmd:    store.Ticket,
+		Key:    idC,
+		ReplId: idC,
+		Value:  marshalTestTicket(t, timestamppb.New(now.Add(60*time.Second))),
+	})
+
+	tc.applyIncomingUpdate(logger, store.StateUpdate{
+		Cmd:  store.Activate,
+		Keys: []string{idA, idB, idC},
+	})
+	assert.Equal(t, int64(3), tc.ActiveCount())
+
+	tc.expireCacheEntries(context.Background())
+
+	_, hasA := tc.Tickets.Load(idA)
+	_, hasB := tc.Tickets.Load(idB)
+	_, hasC := tc.Tickets.Load(idC)
+	assert.False(t, hasA, "Ticket A (exp == R + TTL) must be evicted")
+	assert.False(t, hasB, "Ticket B (exp == R + TTL + 1s) must be evicted")
+	assert.True(t, hasC, "Control Ticket C must remain")
+
+	snap := tc.SnapshotActiveTickets()
+	assert.NotContains(t, snap, idA)
+	assert.NotContains(t, snap, idB)
+	assert.Contains(t, snap, idC)
+	assert.Equal(t, int64(1), tc.ActiveCount())
+	assert.Equal(t, int64(1), tc.TicketCount())
+	assert.Equal(t, int64(0), tc.InactiveCount())
+}
+
+// 18. Regression: Expiration-Time Eviction Removes InactiveSet Entry
+func TestExpirationTimeEvictionRemovesInactiveSetEntry(t *testing.T) {
+	cfg := newFastTestConfig()
+	cfg.Set("OM_CACHE_TICKET_TTL_MS", 600000)
+	tc := New(cfg, nil)
+
+	nowMs := time.Now().UnixMilli()
+	id := fmt.Sprintf("%013d-1", nowMs-1000)
+
+	tc.applyIncomingUpdate(logger, store.StateUpdate{
+		Cmd:    store.Ticket,
+		Key:    id,
+		ReplId: id,
+		Value:  marshalTestTicket(t, timestamppb.New(time.UnixMilli(nowMs-500))),
+	})
+	_, inInactiveInitial := tc.InactiveSet.Load(id)
+	assert.True(t, inInactiveInitial)
+	// Ensure id is in InactiveSet even when overlaid onto pre-M2 baselines where Ticket started active.
+	tc.applyIncomingUpdate(logger, store.StateUpdate{Cmd: store.Deactivate, Key: id})
+
+	tc.expireCacheEntries(context.Background())
+
+	_, inTickets := tc.Tickets.Load(id)
+	_, inInactive := tc.InactiveSet.Load(id)
+	assert.False(t, inTickets, "expired ticket must be removed from Tickets")
+	assert.False(t, inInactive, "Pass 2 expiration-time eviction must remove ticket from InactiveSet")
+	assert.Equal(t, int64(0), tc.TicketCount())
+	assert.Equal(t, int64(0), tc.InactiveCount())
+	assert.Equal(t, int64(0), tc.ActiveCount())
+
+	// Second cycle changes nothing.
+	tc.expireCacheEntries(context.Background())
+	_, inTicketsAfter := tc.Tickets.Load(id)
+	_, inInactiveAfter := tc.InactiveSet.Load(id)
+	assert.False(t, inTicketsAfter)
+	assert.False(t, inInactiveAfter)
+	assert.Equal(t, int64(0), tc.TicketCount())
+	assert.Equal(t, int64(0), tc.InactiveCount())
+	assert.Equal(t, int64(0), tc.ActiveCount())
 }

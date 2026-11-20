@@ -190,7 +190,7 @@ func BenchmarkExpireCacheEntries(b *testing.B) {
 				})
 				if i%2 == 0 {
 					tc.applyIncomingUpdate(logger, store.StateUpdate{
-						Cmd: store.Deactivate,
+						Cmd: store.Activate,
 						Key: id,
 					})
 				}
@@ -224,9 +224,9 @@ func BenchmarkSnapshotActiveTickets(b *testing.B) {
 			Key:   id,
 			Value: payload,
 		})
-		if i >= activeTickets {
+		if i < activeTickets {
 			tc.applyIncomingUpdate(logger, store.StateUpdate{
-				Cmd: store.Deactivate,
+				Cmd: store.Activate,
 				Key: id,
 			})
 		}
@@ -272,11 +272,7 @@ func BenchmarkReplicationThroughput(b *testing.B) {
 			simRep := newSimulatedLatencyReplicator(cfg, 100*time.Microsecond, 100*time.Microsecond, 100000)
 			tc := New(cfg, simRep)
 
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-
-			go tc.OutgoingReplicationQueue(ctx)
-			go tc.IncomingReplicationQueue(ctx)
+			ctx := startTestQueues(b, tc.OutgoingReplicationQueue, tc.IncomingReplicationQueue)
 
 			b.ReportAllocs()
 			b.ResetTimer()
@@ -343,11 +339,7 @@ func TestSyntheticBurstReplicationStress(t *testing.T) {
 		simRep := newSimulatedLatencyReplicator(cfg, 500*time.Microsecond, 500*time.Microsecond, 20000)
 		tc := New(cfg, simRep)
 
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-
-		go tc.OutgoingReplicationQueue(ctx)
-		go tc.IncomingReplicationQueue(ctx)
+		ctx := startTestQueues(t, tc.OutgoingReplicationQueue, tc.IncomingReplicationQueue)
 
 		payload := makeSerializedTicketPayload()
 		nowMs := time.Now().UnixMilli()
@@ -365,6 +357,10 @@ func TestSyntheticBurstReplicationStress(t *testing.T) {
 					Value: payload,
 				})
 			}
+			tc.applyIncomingUpdate(logger, store.StateUpdate{
+				Cmd:  store.Activate,
+				Keys: matchTickets[m],
+			})
 		}
 
 		require.Equal(t, int64(totalTickets), tc.ActiveCount())
@@ -445,14 +441,9 @@ func TestSyntheticBurstReplicationStress(t *testing.T) {
 		simRep := newSimulatedLatencyReplicator(cfg, 100*time.Microsecond, 100*time.Microsecond, 20000)
 		tc := New(cfg, simRep)
 
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-
-		go tc.OutgoingReplicationQueue(ctx)
-		go tc.IncomingReplicationQueue(ctx)
-
-		// Seed 2,000 tickets whose creation timestamp encoded in their ID is already past OM_CACHE_TICKET_TTL_MS (5,000ms),
-		// so as soon as they are deactivated and pushed onto inactiveHeap they are immediately eligible for TTL eviction.
+		// Seed and activate all 2,000 tickets BEFORE starting the replication queues:
+		// their creation timestamps are already past OM_CACHE_TICKET_TTL_MS (5,000ms),
+		// so the background expiration ticker would evict them if they were still inactive.
 		expiredCreationMs := time.Now().UnixMilli() - 20000
 		payload := makeSerializedTicketPayload()
 		allTicketIds := make([]string, totalExpiringTickets)
@@ -465,7 +456,13 @@ func TestSyntheticBurstReplicationStress(t *testing.T) {
 				Value: payload,
 			})
 		}
+		tc.applyIncomingUpdate(logger, store.StateUpdate{
+			Cmd:  store.Activate,
+			Keys: allTicketIds,
+		})
 		require.Equal(t, int64(totalExpiringTickets), tc.ActiveCount())
+
+		ctx := startTestQueues(t, tc.OutgoingReplicationQueue, tc.IncomingReplicationQueue)
 
 		var (
 			confirmedDeactivated sync.Map

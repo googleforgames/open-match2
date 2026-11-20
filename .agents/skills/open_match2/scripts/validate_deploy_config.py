@@ -26,9 +26,11 @@ Collector sidecar Dockerfiles, and GKE deployment manifests for:
   5. OpenTelemetry Collector sidecar Dockerfile config paths
      (/etc/otelcol-google/config.yaml and /etc/otelcol-contrib/config.yaml) and
      bare ENTRYPOINT overrides.
-  6. Cloud Run Knative annotations and gcloud run deploy flags for always-on CPU
-     (--no-cpu-throttling / run.googleapis.com/cpu-throttling: 'false'), Gen2
-     execution environment (gen2), and warm minimum instances (>= 1).
+  6. Cloud Run Knative annotations, container limits, OM_LOGGING_LEVEL, request
+     timeouts, and gcloud run deploy flags (--no-cpu-throttling, gen2,
+     --min-instances, --no-allow-unauthenticated, --ingress, --timeout).
+  7. GKE Deployment replicas, terminationGracePeriodSeconds, and om-core native
+     lifecycle.preStop.sleep.seconds draining settings.
 
 Exit codes:
   0 - All audited files passed validation (warnings may be present in non-strict mode).
@@ -101,6 +103,24 @@ VALID_INGRESS_VALUES: Set[str] = {
     "internal-and-cloud-load-balancing",
     "all",
 }
+
+# Derived from the default timeouts set in internal/config/config.go
+# (OM_MMF_TIMEOUT_SECS = 600 + OM_MATCH_TICKET_DEACTIVATION_TIMEOUT_MS = 60000 / 1000 = 660).
+# Update this constant if those defaults in internal/config/config.go change.
+MIN_CLOUD_RUN_TIMEOUT_SECONDS: int = 660
+MAX_CLOUD_RUN_TIMEOUT_SECONDS: int = 3600
+
+CLOUD_RUN_TIMEOUT_RULE: str = (
+    "The Cloud Run request timeout must be at least `OM_MMF_TIMEOUT_SECS` + "
+    "`OM_MATCH_TICKET_DEACTIVATION_TIMEOUT_MS` ÷ 1000. Both are defined in "
+    "`internal/config/config.go` and overridable by environment variables. With the "
+    "default timeouts set in `internal/config/config.go`, that is 660 s. The Cloud Run "
+    "maximum is 3600 s."
+)
+
+# Default graceful shutdown budget: 5 s server drain in start (server.go) +
+# 3 s replication stop in main.go = 8 s.
+DEFAULT_SHUTDOWN_BUDGET_SECONDS: int = 8
 
 
 @dataclass(frozen=True)
@@ -507,6 +527,195 @@ def _audit_otel_dockerfile(
             )
 
 
+@dataclass
+class _ContainerSpec:
+    start_line: int
+    name: Optional[str] = None
+    image: Optional[str] = None
+    limits_cpu: Optional[str] = None
+    limits_memory: Optional[str] = None
+    has_prestop: bool = False
+    prestop_sleep_seconds: Optional[Tuple[int, str]] = None
+
+
+def _parse_k8s_containers(lines: Sequence[str], start_line_offset: int = 0) -> List[_ContainerSpec]:
+    """Parses container blocks under `containers:` in a Knative or Kubernetes manifest."""
+    containers: List[_ContainerSpec] = []
+    in_containers = False
+    containers_indent = 0
+    container_item_indent: Optional[int] = None
+    container_key_indent: Optional[int] = None
+    current: Optional[_ContainerSpec] = None
+
+    current_top_section: Optional[str] = None
+    in_limits = False
+    limits_indent = 0
+    in_prestop = False
+    prestop_indent = 0
+    in_sleep = False
+    sleep_indent = 0
+
+    def _apply_container_kv(spec: _ContainerSpec, key: str, val_part: str) -> None:
+        if key == "name" and spec.name is None:
+            spec.name = _unquote(val_part)
+        elif key == "image" and spec.image is None:
+            spec.image = _unquote(val_part)
+        elif key == "resources":
+            m_flow_lim = re.search(r"\blimits\s*:\s*\{([^}]*)\}", val_part)
+            if m_flow_lim:
+                inner = m_flow_lim.group(1)
+                m_c = re.search(r"\bcpu\s*:\s*([^,\s}]+)", inner)
+                m_m = re.search(r"\bmemory\s*:\s*([^,\s}]+)", inner)
+                if m_c:
+                    spec.limits_cpu = _unquote(m_c.group(1))
+                if m_m:
+                    spec.limits_memory = _unquote(m_m.group(1))
+
+    for idx, raw_line in enumerate(lines):
+        line_no = start_line_offset + idx + 1
+        raw_code = _strip_inline_comment(raw_line)
+        stripped = raw_code.strip()
+        if not stripped:
+            continue
+        indent = len(raw_code) - len(raw_code.lstrip(" "))
+
+        if not in_containers:
+            if re.match(r"^containers\s*:\s*$", stripped):
+                in_containers = True
+                containers_indent = indent
+                container_item_indent = None
+                container_key_indent = None
+                current = None
+            continue
+
+        if indent < containers_indent or (indent == containers_indent and not stripped.startswith("-")):
+            if current is not None:
+                containers.append(current)
+                current = None
+            in_containers = False
+            if re.match(r"^containers\s*:\s*$", stripped):
+                in_containers = True
+                containers_indent = indent
+                container_item_indent = None
+                container_key_indent = None
+            continue
+
+        if stripped.startswith("-") and (container_item_indent is None or indent == container_item_indent):
+            if container_item_indent is None:
+                container_item_indent = indent
+            if current is not None:
+                containers.append(current)
+            current = _ContainerSpec(start_line=line_no)
+            after_dash = stripped[1:]
+            lead_spaces = len(after_dash) - len(after_dash.lstrip(" "))
+            container_key_indent = indent + 1 + lead_spaces
+            first_item = after_dash.strip()
+            current_top_section = None
+            in_limits = False
+            in_prestop = False
+            in_sleep = False
+            if ":" in first_item:
+                k, v = first_item.split(":", 1)
+                k = k.strip()
+                current_top_section = k
+                _apply_container_kv(current, k, v.strip())
+            continue
+
+        if current is None or container_key_indent is None:
+            continue
+
+        if indent == container_key_indent and not stripped.startswith("-"):
+            in_limits = False
+            in_prestop = False
+            in_sleep = False
+            if ":" in stripped:
+                k, v = stripped.split(":", 1)
+                k = k.strip()
+                current_top_section = k
+                _apply_container_kv(current, k, v.strip())
+            else:
+                current_top_section = None
+            continue
+
+        if current_top_section == "resources":
+            if in_limits and indent <= limits_indent:
+                in_limits = False
+            if not in_limits:
+                m_lim = re.match(r"^limits\s*:\s*(.*)$", stripped)
+                if m_lim:
+                    rest = m_lim.group(1).strip()
+                    if rest.startswith("{") and rest.endswith("}"):
+                        inner = rest[1:-1]
+                        m_c = re.search(r"\bcpu\s*:\s*([^,\s}]+)", inner)
+                        m_m = re.search(r"\bmemory\s*:\s*([^,\s}]+)", inner)
+                        if m_c:
+                            current.limits_cpu = _unquote(m_c.group(1))
+                        if m_m:
+                            current.limits_memory = _unquote(m_m.group(1))
+                    else:
+                        in_limits = True
+                        limits_indent = indent
+            else:
+                m_c = re.match(r"^cpu\s*:\s*(.+)$", stripped)
+                if m_c:
+                    val_c = _unquote(m_c.group(1))
+                    if val_c:
+                        current.limits_cpu = val_c
+                m_m = re.match(r"^memory\s*:\s*(.+)$", stripped)
+                if m_m:
+                    val_m = _unquote(m_m.group(1))
+                    if val_m:
+                        current.limits_memory = val_m
+
+        elif current_top_section == "lifecycle":
+            if in_sleep and indent <= sleep_indent:
+                in_sleep = False
+            if in_prestop and indent <= prestop_indent:
+                in_prestop = False
+                in_sleep = False
+
+            if not in_prestop:
+                m_ps = re.match(r"^preStop\s*:\s*(.*)$", stripped)
+                if m_ps:
+                    current.has_prestop = True
+                    rest = m_ps.group(1).strip()
+                    m_flow_sec = re.search(r"\bsleep\s*:\s*\{\s*seconds\s*:\s*([^,\s}]+)", rest)
+                    if m_flow_sec:
+                        current.prestop_sleep_seconds = (line_no, _unquote(m_flow_sec.group(1)))
+                    else:
+                        in_prestop = True
+                        prestop_indent = indent
+            elif not in_sleep:
+                m_sl = re.match(r"^sleep\s*:\s*(.*)$", stripped)
+                if m_sl:
+                    rest = m_sl.group(1).strip()
+                    m_flow_sec = re.search(r"\bseconds\s*:\s*([^,\s}]+)", rest)
+                    if m_flow_sec:
+                        current.prestop_sleep_seconds = (line_no, _unquote(m_flow_sec.group(1)))
+                    else:
+                        in_sleep = True
+                        sleep_indent = indent
+            else:
+                m_sec = re.match(r"^seconds\s*:\s*(.*)$", stripped)
+                if m_sec:
+                    current.prestop_sleep_seconds = (line_no, _unquote(m_sec.group(1)))
+
+    if current is not None:
+        containers.append(current)
+
+    return containers
+
+
+def _find_om_core_container(containers: Sequence[_ContainerSpec]) -> Optional[_ContainerSpec]:
+    for c in containers:
+        if c.name in ("core", "om-core"):
+            return c
+    for c in containers:
+        if c.image and "om-core" in c.image:
+            return c
+    return None
+
+
 def _audit_knative_service_yaml(
     display_path: str,
     lines: Sequence[str],
@@ -517,6 +726,9 @@ def _audit_knative_service_yaml(
     exec_env: Optional[Tuple[int, str]] = None
     min_scale: Optional[Tuple[int, str]] = None
     ingress: Optional[Tuple[int, str]] = None
+    timeout_seconds: Optional[Tuple[int, str]] = None
+    logging_levels: List[Tuple[int, str]] = []
+    pending_env_name: Optional[str] = None
 
     for line_no, raw_line in enumerate(lines, start=1):
         code = _strip_inline_comment(raw_line).strip()
@@ -542,6 +754,34 @@ def _audit_knative_service_yaml(
         if m_ing:
             ingress = (line_no, _unquote(m_ing.group(1)))
             continue
+
+        m_timeout = re.match(r"^timeoutSeconds\s*:\s*(.*)$", code)
+        if m_timeout:
+            timeout_seconds = (line_no, _unquote(m_timeout.group(1)))
+            continue
+
+        flow_name = re.search(r"\bname\s*:\s*(['\"]?[A-Za-z0-9_]+['\"]?)", code)
+        flow_val = re.search(r"\bvalue\s*:\s*([^,}]+)", code)
+        if flow_name and flow_val:
+            if _unquote(flow_name.group(1)) == "OM_LOGGING_LEVEL":
+                logging_levels.append((line_no, _unquote(flow_val.group(1))))
+            pending_env_name = None
+            continue
+
+        m_ename = re.match(r"^(?:-\s*)?name\s*:\s*(.+)$", code)
+        if m_ename:
+            pending_env_name = _unquote(m_ename.group(1))
+            continue
+
+        m_eval = re.match(r"^(?:-\s*)?value\s*:\s*(.*)$", code)
+        if m_eval:
+            if pending_env_name == "OM_LOGGING_LEVEL":
+                logging_levels.append((line_no, _unquote(m_eval.group(1))))
+            pending_env_name = None
+            continue
+
+        if code.startswith("- ") or ":" in code:
+            pending_env_name = None
 
     if cpu_throttling is None:
         findings.append(
@@ -641,6 +881,80 @@ def _audit_knative_service_yaml(
             )
         )
 
+    if timeout_seconds is None:
+        findings.append(
+            Finding(
+                "WARN",
+                display_path,
+                1,
+                f"Missing 'timeoutSeconds' on Cloud Run revision template. {CLOUD_RUN_TIMEOUT_RULE}",
+            )
+        )
+    else:
+        t_line, t_raw = timeout_seconds
+        if not re.match(r"^[+-]?\d+$", t_raw):
+            findings.append(
+                Finding(
+                    "ERROR",
+                    display_path,
+                    t_line,
+                    f"Cloud Run 'timeoutSeconds' must be an integer, got '{t_raw}'. {CLOUD_RUN_TIMEOUT_RULE}",
+                )
+            )
+        else:
+            t_val = int(t_raw, 10)
+            if t_val <= 0 or t_val > MAX_CLOUD_RUN_TIMEOUT_SECONDS:
+                findings.append(
+                    Finding(
+                        "ERROR",
+                        display_path,
+                        t_line,
+                        f"Cloud Run 'timeoutSeconds' must be between 1 and {MAX_CLOUD_RUN_TIMEOUT_SECONDS}, got {t_val}. {CLOUD_RUN_TIMEOUT_RULE}",
+                    )
+                )
+            elif t_val < MIN_CLOUD_RUN_TIMEOUT_SECONDS:
+                findings.append(
+                    Finding(
+                        "WARN",
+                        display_path,
+                        t_line,
+                        f"Cloud Run 'timeoutSeconds' is {t_val} s, below minimum {MIN_CLOUD_RUN_TIMEOUT_SECONDS} s. {CLOUD_RUN_TIMEOUT_RULE}",
+                    )
+                )
+
+    for lvl_line, lvl_val in logging_levels:
+        if lvl_val.lower() in ("debug", "trace"):
+            findings.append(
+                Finding(
+                    "WARN",
+                    display_path,
+                    lvl_line,
+                    f"Environment variable 'OM_LOGGING_LEVEL' is '{lvl_val}'; use 'info' "
+                    "(the default in internal/config/config.go) or higher in production.",
+                )
+            )
+
+    containers = _parse_k8s_containers(lines)
+    om_core_container = _find_om_core_container(containers)
+    if om_core_container is not None:
+        missing_limits: List[str] = []
+        if not om_core_container.limits_cpu:
+            missing_limits.append("cpu")
+        if not om_core_container.limits_memory:
+            missing_limits.append("memory")
+        if missing_limits:
+            cname = om_core_container.name or "om-core"
+            findings.append(
+                Finding(
+                    "WARN",
+                    display_path,
+                    om_core_container.start_line,
+                    f"Cloud Run container '{cname}' is missing resource limit(s): "
+                    f"{', '.join(missing_limits)} under 'resources.limits' "
+                    "(recommended cpu: '2' and memory: 1Gi in deploy/cloud_run/service.yaml).",
+                )
+            )
+
 
 def _audit_otel_collector_config(
     display_path: str,
@@ -666,9 +980,10 @@ def _audit_otel_collector_config(
 def _audit_cloudbuild_yaml(
     display_path: str,
     lines: Sequence[str],
+    substitutions: Dict[str, Tuple[int, str]],
     findings: List[Finding],
 ) -> None:
-    """Audits Cloud Build gcloud run deploy steps for CPU, gen2, min-instances, auth, and ingress flags."""
+    """Audits Cloud Build gcloud run deploy steps for CPU, gen2, min-instances, auth, ingress, and timeout flags."""
     # Group args tokens per Cloud Build step so flags from later steps cannot bleed in.
     step_token_groups: List[List[Tuple[int, str]]] = []
     current_tokens: List[Tuple[int, str]] = []
@@ -765,9 +1080,45 @@ def _audit_cloudbuild_yaml(
             ingress_val: Optional[str] = None
             ingress_line = step_line
 
+            seen_container_flag = False
+            service_timeout: Optional[Tuple[int, str]] = None
+            container_scoped_timeout_line: Optional[int] = None
+
             i = 0
             while i < len(step_tokens):
                 line_no, tok = step_tokens[i]
+
+                if tok == "--container":
+                    seen_container_flag = True
+                    if i + 1 < len(step_tokens) and not step_tokens[i + 1][1].startswith("-"):
+                        i += 1
+                    i += 1
+                    continue
+                elif tok.startswith("--container="):
+                    seen_container_flag = True
+                    i += 1
+                    continue
+
+                if tok == "--timeout":
+                    if i + 1 < len(step_tokens) and not step_tokens[i + 1][1].startswith("-"):
+                        t_raw = _unquote(step_tokens[i + 1][1])
+                        i += 1
+                    else:
+                        t_raw = ""
+                    if seen_container_flag:
+                        container_scoped_timeout_line = line_no
+                    else:
+                        service_timeout = (line_no, t_raw)
+                    i += 1
+                    continue
+                elif tok.startswith("--timeout="):
+                    t_raw = _unquote(tok.split("=", 1)[1])
+                    if seen_container_flag:
+                        container_scoped_timeout_line = line_no
+                    else:
+                        service_timeout = (line_no, t_raw)
+                    i += 1
+                    continue
 
                 if tok == "--no-cpu-throttling":
                     has_no_cpu_throttling = True
@@ -931,6 +1282,77 @@ def _audit_cloudbuild_yaml(
                     )
                 )
 
+            if container_scoped_timeout_line is not None and service_timeout is None:
+                findings.append(
+                    Finding(
+                        "ERROR",
+                        display_path,
+                        container_scoped_timeout_line,
+                        f"gcloud run deploy '--timeout' must be placed among service-level flags before the first '--container' flag. {CLOUD_RUN_TIMEOUT_RULE}",
+                    )
+                )
+            elif service_timeout is None:
+                findings.append(
+                    Finding(
+                        "WARN",
+                        display_path,
+                        step_line,
+                        f"gcloud run deploy step is missing '--timeout'. {CLOUD_RUN_TIMEOUT_RULE}",
+                    )
+                )
+            else:
+                if container_scoped_timeout_line is not None:
+                    findings.append(
+                        Finding(
+                            "ERROR",
+                            display_path,
+                            container_scoped_timeout_line,
+                            f"gcloud run deploy '--timeout' must be placed before the first '--container' flag, not inside a container section. {CLOUD_RUN_TIMEOUT_RULE}",
+                        )
+                    )
+                t_line, t_val_str = service_timeout
+                sub_match = re.match(r"^\$\{([A-Za-z0-9_]+)\}$", t_val_str)
+                if sub_match:
+                    sub_key = sub_match.group(1)
+                    if sub_key in substitutions:
+                        t_line, t_val_str = substitutions[sub_key]
+                        t_val_str = _unquote(t_val_str)
+                if not t_val_str.startswith("$"):
+                    numeric_str = (
+                        t_val_str[:-1]
+                        if (len(t_val_str) > 1 and t_val_str.endswith("s"))
+                        else t_val_str
+                    )
+                    if not re.match(r"^[+-]?\d+$", numeric_str):
+                        findings.append(
+                            Finding(
+                                "ERROR",
+                                display_path,
+                                t_line,
+                                f"gcloud run deploy '--timeout' must be an integer (with optional trailing 's'), got '{t_val_str}'. {CLOUD_RUN_TIMEOUT_RULE}",
+                            )
+                        )
+                    else:
+                        t_parsed = int(numeric_str, 10)
+                        if t_parsed <= 0 or t_parsed > MAX_CLOUD_RUN_TIMEOUT_SECONDS:
+                            findings.append(
+                                Finding(
+                                    "ERROR",
+                                    display_path,
+                                    t_line,
+                                    f"gcloud run deploy '--timeout' must be between 1 and {MAX_CLOUD_RUN_TIMEOUT_SECONDS} s, got {t_parsed}. {CLOUD_RUN_TIMEOUT_RULE}",
+                                )
+                            )
+                        elif t_parsed < MIN_CLOUD_RUN_TIMEOUT_SECONDS:
+                            findings.append(
+                                Finding(
+                                    "WARN",
+                                    display_path,
+                                    t_line,
+                                    f"gcloud run deploy '--timeout' is {t_parsed} s, below minimum {MIN_CLOUD_RUN_TIMEOUT_SECONDS} s. {CLOUD_RUN_TIMEOUT_RULE}",
+                                )
+                            )
+
 
 def _audit_gke_manifest(
     display_path: str,
@@ -938,42 +1360,172 @@ def _audit_gke_manifest(
     findings: List[Finding],
 ) -> None:
     """Audits Kubernetes / GKE Deployment manifests (e.g. deploy/gke/om.yaml)."""
-    for line_no, raw_line in enumerate(lines, start=1):
-        code = _strip_inline_comment(raw_line).strip()
-        if not code:
+    docs: List[Tuple[int, List[str]]] = []
+    cur_start = 0
+    cur_lines: List[str] = []
+    for idx, raw_line in enumerate(lines):
+        if re.match(r"^---\s*$", _strip_inline_comment(raw_line).strip()):
+            if cur_lines:
+                docs.append((cur_start, cur_lines))
+            cur_start = idx + 1
+            cur_lines = []
+        else:
+            cur_lines.append(raw_line)
+    if cur_lines:
+        docs.append((cur_start, cur_lines))
+
+    for doc_offset, doc_lines in docs:
+        deploy_line: Optional[int] = None
+        for rel_idx, raw_line in enumerate(doc_lines):
+            if re.match(r"^kind\s*:\s*Deployment\b", _strip_inline_comment(raw_line).strip()):
+                deploy_line = doc_offset + rel_idx + 1
+                break
+        if deploy_line is None:
             continue
-        m_rep = re.match(r"^replicas\s*:\s*(\S+)$", code)
-        if m_rep:
-            raw_rep = _unquote(m_rep.group(1))
-            try:
-                rep_val = int(raw_rep, 10)
-                if rep_val < 1:
+
+        grace_period: Optional[Tuple[int, str]] = None
+        for rel_idx, raw_line in enumerate(doc_lines):
+            line_no = doc_offset + rel_idx + 1
+            code = _strip_inline_comment(raw_line).strip()
+            if not code:
+                continue
+            m_rep = re.match(r"^replicas\s*:\s*(\S+)$", code)
+            if m_rep:
+                raw_rep = _unquote(m_rep.group(1))
+                try:
+                    rep_val = int(raw_rep, 10)
+                    if rep_val < 1:
+                        findings.append(
+                            Finding(
+                                "ERROR",
+                                display_path,
+                                line_no,
+                                f"GKE Deployment 'replicas' must be >= 1, got {rep_val}.",
+                            )
+                        )
+                    elif rep_val < 2:
+                        findings.append(
+                            Finding(
+                                "WARN",
+                                display_path,
+                                line_no,
+                                f"GKE Deployment 'replicas' is {rep_val}; at least 2 replicas are recommended for production HA.",
+                            )
+                        )
+                except ValueError:
                     findings.append(
                         Finding(
                             "ERROR",
                             display_path,
                             line_no,
-                            f"GKE Deployment 'replicas' must be >= 1, got {rep_val}.",
+                            f"GKE Deployment 'replicas' must be an integer >= 1, got '{raw_rep}'.",
                         )
                     )
-                elif rep_val < 2:
-                    findings.append(
-                        Finding(
-                            "WARN",
-                            display_path,
-                            line_no,
-                            f"GKE Deployment 'replicas' is {rep_val}; at least 2 replicas are recommended for production HA.",
-                        )
-                    )
-            except ValueError:
+                continue
+
+            m_grace = re.match(r"^terminationGracePeriodSeconds\s*:\s*(.*)$", code)
+            if m_grace:
+                grace_period = (line_no, _unquote(m_grace.group(1)))
+
+        containers = _parse_k8s_containers(doc_lines, start_line_offset=doc_offset)
+        om_core = _find_om_core_container(containers)
+        prestop_seconds_int: Optional[int] = None
+
+        if om_core is None:
+            findings.append(
+                Finding(
+                    "WARN",
+                    display_path,
+                    deploy_line,
+                    "GKE Deployment has no 'om-core' container with 'lifecycle.preStop.sleep.seconds' configured "
+                    "(native sleep action requires Kubernetes 1.30 or later and lets the pod leave Service endpoints before SIGTERM).",
+                )
+            )
+        elif om_core.prestop_sleep_seconds is None:
+            cname = om_core.name or "om-core"
+            findings.append(
+                Finding(
+                    "WARN",
+                    display_path,
+                    om_core.start_line,
+                    f"GKE Deployment container '{cname}' has no 'lifecycle.preStop.sleep.seconds' configured "
+                    "(native sleep action requires Kubernetes 1.30 or later and lets the pod leave Service endpoints before SIGTERM).",
+                )
+            )
+        else:
+            ps_line, ps_raw = om_core.prestop_sleep_seconds
+            cname = om_core.name or "om-core"
+            if not re.match(r"^[+-]?\d+$", ps_raw):
                 findings.append(
                     Finding(
                         "ERROR",
                         display_path,
-                        line_no,
-                        f"GKE Deployment 'replicas' must be an integer >= 1, got '{raw_rep}'.",
+                        ps_line,
+                        f"GKE Deployment container '{cname}' 'lifecycle.preStop.sleep.seconds' must be an integer, got '{ps_raw}'.",
                     )
                 )
+            else:
+                ps_val = int(ps_raw, 10)
+                if ps_val <= 0:
+                    findings.append(
+                        Finding(
+                            "ERROR",
+                            display_path,
+                            ps_line,
+                            f"GKE Deployment container '{cname}' 'lifecycle.preStop.sleep.seconds' must be > 0, got {ps_val}.",
+                        )
+                    )
+                else:
+                    prestop_seconds_int = ps_val
+
+        effective_prestop = prestop_seconds_int if prestop_seconds_int is not None else 0
+        min_grace = effective_prestop + DEFAULT_SHUTDOWN_BUDGET_SECONDS
+
+        if grace_period is None:
+            findings.append(
+                Finding(
+                    "WARN",
+                    display_path,
+                    deploy_line,
+                    f"GKE Deployment is missing 'terminationGracePeriodSeconds'; must be at least "
+                    f"lifecycle.preStop.sleep.seconds + {DEFAULT_SHUTDOWN_BUDGET_SECONDS} s "
+                    "(covering the 5 s server drain default in start in server.go and the 3 s replication stop default in main.go).",
+                )
+            )
+        else:
+            g_line, g_raw = grace_period
+            if not re.match(r"^[+-]?\d+$", g_raw):
+                findings.append(
+                    Finding(
+                        "ERROR",
+                        display_path,
+                        g_line,
+                        f"GKE Deployment 'terminationGracePeriodSeconds' must be an integer, got '{g_raw}' "
+                        "(must cover lifecycle.preStop.sleep.seconds plus the 5 s server drain default in start in server.go and the 3 s replication stop default in main.go).",
+                    )
+                )
+            else:
+                g_val = int(g_raw, 10)
+                if g_val < 0:
+                    findings.append(
+                        Finding(
+                            "ERROR",
+                            display_path,
+                            g_line,
+                            f"GKE Deployment 'terminationGracePeriodSeconds' must be >= 0, got {g_val}.",
+                        )
+                    )
+                elif g_val < min_grace:
+                    findings.append(
+                        Finding(
+                            "WARN",
+                            display_path,
+                            g_line,
+                            f"GKE Deployment 'terminationGracePeriodSeconds' is {g_val} s, shorter than "
+                            f"preStop sleep ({effective_prestop} s) + {DEFAULT_SHUTDOWN_BUDGET_SECONDS} s ({min_grace} s), "
+                            "covering the 5 s server drain default in start in server.go and the 3 s replication stop default in main.go.",
+                        )
+                    )
 
 
 def audit_file(
@@ -1023,7 +1575,7 @@ def audit_file(
         re.match(r"^steps\s*:", _strip_inline_comment(line).strip()) for line in lines
     )
     if has_cloudbuild_steps:
-        _audit_cloudbuild_yaml(display_path, lines, findings)
+        _audit_cloudbuild_yaml(display_path, lines, substitutions, findings)
 
     has_k8s_deployment = any(
         re.match(r"^kind\s*:\s*Deployment\b", _strip_inline_comment(line).strip())

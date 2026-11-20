@@ -68,6 +68,9 @@ steps:
       - "2"
       - --concurrency
       - "1000"
+      # The Cloud Run request timeout must be at least `OM_MMF_TIMEOUT_SECS` + `OM_MATCH_TICKET_DEACTIVATION_TIMEOUT_MS` ÷ 1000. Both are defined in `internal/config/config.go` and overridable by environment variables. With the default timeouts set in `internal/config/config.go`, that is 660 s. The Cloud Run maximum is 3600 s.
+      - --timeout
+      - "900"
       - --service-account
       - ${_SERVICE_ACCOUNT}
       - --region
@@ -100,8 +103,10 @@ steps:
       - '${_ARTIFACT_REGISTRY_URI}/${_JOB_NAME}:${COMMIT_SHA}'
       - --port
       - "8080"
+      - --cpu
+      - "2"
       - --memory
-      - 1024Mi
+      - 1Gi
 
       # env vars for 'core'
       - --update-env-vars

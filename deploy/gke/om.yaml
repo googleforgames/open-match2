@@ -36,12 +36,19 @@ spec:
         app: open-match-deployment
     spec:
       serviceAccountName: open-match-sa
+      # Covers the 10 s preStop sleep plus the shutdown defaults in start (server.go, 5 s) and main.go (3 s).
+      terminationGracePeriodSeconds: 30
       containers:
         - image: us-docker.pkg.dev/open-match-public-images/open-match2/om-core
           imagePullPolicy: Always
           name: om-core
           ports:
           - containerPort: 8080
+          # The native sleep action requires Kubernetes 1.30 or later, and lets the pod leave Service endpoints before SIGTERM.
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 10
           env:
           - name: OM_LOGGING_LEVEL
             value: info

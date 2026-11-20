@@ -37,12 +37,16 @@ spec:
       containerConcurrency: 1000 
       containers:
       - image: us-docker.pkg.dev/open-match-public-images/open-match2/om-core
-        name: core 
+        name: core
         ports:
         - containerPort: 8080
+        resources:
+          limits:
+            cpu: '2'
+            memory: 1Gi
         env:
         - name: OM_LOGGING_LEVEL
-          value: debug
+          value: info
         - name: OM_REDIS_WRITE_HOST
           value: $PRIMARY_ENDPOINT
         - name: OM_REDIS_READ_HOST
@@ -50,4 +54,5 @@ spec:
       - image: us-docker.pkg.dev/open-match-public-images/open-match2/otel-collector-sidecar
         name: opentelemetry-collector
       serviceAccountName: $SERVICE_ACCOUNT
-      timeoutSeconds: 300
+      # The Cloud Run request timeout must be at least `OM_MMF_TIMEOUT_SECS` + `OM_MATCH_TICKET_DEACTIVATION_TIMEOUT_MS` ÷ 1000. Both are defined in `internal/config/config.go` and overridable by environment variables. With the default timeouts set in `internal/config/config.go`, that is 660 s. The Cloud Run maximum is 3600 s.
+      timeoutSeconds: 900

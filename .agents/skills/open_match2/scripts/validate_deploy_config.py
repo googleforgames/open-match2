@@ -47,9 +47,11 @@ import sys
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 DEFAULT_RELATIVE_PATHS: Tuple[str, ...] = (
+    "ci.yaml",
     "deploy/cloud_run/service.yaml",
     "deploy/cloud_run/cloudbuild.yaml",
     "deploy/cloud_run/otel-collector-sidecar/Dockerfile",
+    "deploy/cloud_run/otel-collector-sidecar/config.yaml",
     "deploy/gke/om.yaml",
 )
 
@@ -620,7 +622,16 @@ def _audit_knative_service_yaml(
                 )
             )
 
-    if ingress is not None and ingress[1] not in VALID_INGRESS_VALUES:
+    if ingress is None:
+        findings.append(
+            Finding(
+                "ERROR",
+                display_path,
+                1,
+                "Missing required annotation 'run.googleapis.com/ingress'.",
+            )
+        )
+    elif ingress[1] not in VALID_INGRESS_VALUES:
         findings.append(
             Finding(
                 "ERROR",
@@ -631,18 +642,69 @@ def _audit_knative_service_yaml(
         )
 
 
+def _audit_otel_collector_config(
+    display_path: str,
+    lines: Sequence[str],
+    findings: List[Finding],
+) -> None:
+    """Audits an OpenTelemetry Collector sidecar config.yaml for googlemanagedprometheus."""
+    has_gmp = any(
+        "googlemanagedprometheus" in _strip_inline_comment(line)
+        for line in lines
+    )
+    if not has_gmp:
+        findings.append(
+            Finding(
+                "ERROR",
+                display_path,
+                1,
+                "OTel Collector configuration is missing 'googlemanagedprometheus' exporter.",
+            )
+        )
+
+
 def _audit_cloudbuild_yaml(
     display_path: str,
     lines: Sequence[str],
     findings: List[Finding],
 ) -> None:
-    """Audits Cloud Build gcloud run deploy steps for CPU, gen2, and min-instances flags."""
-    # Collect args tokens with their source line numbers.
-    tokens: List[Tuple[int, str]] = []
+    """Audits Cloud Build gcloud run deploy steps for CPU, gen2, min-instances, auth, and ingress flags."""
+    # Group args tokens per Cloud Build step so flags from later steps cannot bleed in.
+    step_token_groups: List[List[Tuple[int, str]]] = []
+    current_tokens: List[Tuple[int, str]] = []
+    in_steps = False
+    steps_indent = 0
+    step_item_indent: Optional[int] = None
+
     for line_no, raw_line in enumerate(lines, start=1):
-        code = _strip_inline_comment(raw_line).strip()
+        raw_code = _strip_inline_comment(raw_line)
+        code = raw_code.strip()
         if not code:
             continue
+
+        indent = len(raw_code) - len(raw_code.lstrip(" "))
+        if re.match(r"^steps\s*:\s*$", code):
+            in_steps = True
+            steps_indent = indent
+            step_item_indent = None
+            continue
+
+        if in_steps and indent <= steps_indent and not code.startswith("-"):
+            if current_tokens:
+                step_token_groups.append(current_tokens)
+                current_tokens = []
+            in_steps = False
+            step_item_indent = None
+
+        if in_steps and code.startswith("- "):
+            item_after_dash = code[2:].strip()
+            is_step_header = bool(re.match(r"^(?:name|id|entrypoint|waitFor|env|dir|secretEnv)\s*:", item_after_dash))
+            if is_step_header and (step_item_indent is None or indent == step_item_indent):
+                step_item_indent = indent
+                if current_tokens:
+                    step_token_groups.append(current_tokens)
+                    current_tokens = []
+                continue
 
         # Flow array args: args: ['run', 'deploy', ...]
         flow_args = re.match(r"^args\s*:\s*\[(.*)\]\s*$", code)
@@ -651,163 +713,221 @@ def _audit_cloudbuild_yaml(
             for part in inner.split(","):
                 cleaned = _unquote(part)
                 if cleaned:
-                    tokens.append((line_no, cleaned))
+                    current_tokens.append((line_no, cleaned))
             continue
 
         list_item = re.match(r"^-\s+(.+)$", code)
         if list_item:
             item_val = _unquote(list_item.group(1))
-            if not item_val or ":" in item_val and not item_val.startswith("-") and "=" not in item_val:
+            if not item_val or (":" in item_val and not item_val.startswith("-") and "=" not in item_val):
                 continue
             # Support multi-token list items such as "- --execution-environment gen2"
             if item_val.startswith("--") and " " in item_val and "=" not in item_val:
                 try:
                     for sub_tok in shlex.split(item_val):
-                        tokens.append((line_no, sub_tok))
+                        current_tokens.append((line_no, sub_tok))
                 except ValueError:
-                    tokens.append((line_no, item_val))
+                    current_tokens.append((line_no, item_val))
             else:
-                tokens.append((line_no, item_val))
+                current_tokens.append((line_no, item_val))
 
-    # Locate sequences corresponding to `gcloud run deploy` steps.
-    deploy_indices: List[int] = []
-    for idx in range(len(tokens) - 1):
-        if tokens[idx][1] == "run" and tokens[idx + 1][1] == "deploy":
-            deploy_indices.append(idx)
+    if current_tokens:
+        step_token_groups.append(current_tokens)
 
-    if not deploy_indices:
-        return
+    for group in step_token_groups:
+        deploy_indices: List[int] = []
+        for idx in range(len(group) - 1):
+            if group[idx][1] == "run" and group[idx + 1][1] == "deploy":
+                deploy_indices.append(idx)
 
-    for step_idx, start_pos in enumerate(deploy_indices):
-        end_pos = deploy_indices[step_idx + 1] if step_idx + 1 < len(deploy_indices) else len(tokens)
-        step_tokens = tokens[start_pos:end_pos]
-        step_line = step_tokens[0][0]
+        for step_idx, start_pos in enumerate(deploy_indices):
+            end_pos = deploy_indices[step_idx + 1] if step_idx + 1 < len(deploy_indices) else len(group)
+            step_tokens = group[start_pos:end_pos]
+            step_line = step_tokens[0][0]
 
-        has_no_cpu_throttling = False
-        has_cpu_throttling_enabled = False
-        cpu_line = step_line
+            has_no_cpu_throttling = False
+            has_cpu_throttling_enabled = False
+            cpu_line = step_line
 
-        exec_env_val: Optional[str] = None
-        exec_env_line = step_line
-        has_exec_env_flag = False
+            exec_env_val: Optional[str] = None
+            exec_env_line = step_line
+            has_exec_env_flag = False
 
-        min_instances_val: Optional[str] = None
-        min_instances_line = step_line
-        has_min_instances_flag = False
+            min_instances_val: Optional[str] = None
+            min_instances_line = step_line
+            has_min_instances_flag = False
 
-        i = 0
-        while i < len(step_tokens):
-            line_no, tok = step_tokens[i]
+            has_no_allow_unauth = False
+            has_allow_unauth = False
+            auth_line = step_line
 
-            if tok == "--no-cpu-throttling":
-                has_no_cpu_throttling = True
-                cpu_line = line_no
-            elif tok == "--cpu-throttling":
-                has_cpu_throttling_enabled = True
-                cpu_line = line_no
-            elif tok.startswith("--cpu-throttling="):
-                val = _unquote(tok.split("=", 1)[1]).lower()
-                cpu_line = line_no
-                if val in ("false", "0", "no"):
+            has_ingress_flag = False
+            ingress_val: Optional[str] = None
+            ingress_line = step_line
+
+            i = 0
+            while i < len(step_tokens):
+                line_no, tok = step_tokens[i]
+
+                if tok == "--no-cpu-throttling":
                     has_no_cpu_throttling = True
-                else:
+                    cpu_line = line_no
+                elif tok == "--cpu-throttling":
                     has_cpu_throttling_enabled = True
+                    cpu_line = line_no
+                elif tok.startswith("--cpu-throttling="):
+                    val = _unquote(tok.split("=", 1)[1]).lower()
+                    cpu_line = line_no
+                    if val in ("false", "0", "no"):
+                        has_no_cpu_throttling = True
+                    else:
+                        has_cpu_throttling_enabled = True
 
-            elif tok == "--execution-environment":
-                has_exec_env_flag = True
-                exec_env_line = line_no
-                if i + 1 < len(step_tokens) and not step_tokens[i + 1][1].startswith("-"):
-                    exec_env_val = _unquote(step_tokens[i + 1][1])
-                    i += 1
-                else:
-                    exec_env_val = ""
-            elif tok.startswith("--execution-environment="):
-                has_exec_env_flag = True
-                exec_env_line = line_no
-                exec_env_val = _unquote(tok.split("=", 1)[1])
+                elif tok == "--execution-environment":
+                    has_exec_env_flag = True
+                    exec_env_line = line_no
+                    if i + 1 < len(step_tokens) and not step_tokens[i + 1][1].startswith("-"):
+                        exec_env_val = _unquote(step_tokens[i + 1][1])
+                        i += 1
+                    else:
+                        exec_env_val = ""
+                elif tok.startswith("--execution-environment="):
+                    has_exec_env_flag = True
+                    exec_env_line = line_no
+                    exec_env_val = _unquote(tok.split("=", 1)[1])
 
-            elif tok == "--min-instances":
-                has_min_instances_flag = True
-                min_instances_line = line_no
-                if i + 1 < len(step_tokens) and not step_tokens[i + 1][1].startswith("-"):
-                    min_instances_val = _unquote(step_tokens[i + 1][1])
-                    i += 1
-                else:
-                    min_instances_val = ""
-            elif tok.startswith("--min-instances="):
-                has_min_instances_flag = True
-                min_instances_line = line_no
-                min_instances_val = _unquote(tok.split("=", 1)[1])
+                elif tok == "--min-instances":
+                    has_min_instances_flag = True
+                    min_instances_line = line_no
+                    if i + 1 < len(step_tokens) and not step_tokens[i + 1][1].startswith("-"):
+                        min_instances_val = _unquote(step_tokens[i + 1][1])
+                        i += 1
+                    else:
+                        min_instances_val = ""
+                elif tok.startswith("--min-instances="):
+                    has_min_instances_flag = True
+                    min_instances_line = line_no
+                    min_instances_val = _unquote(tok.split("=", 1)[1])
 
-            i += 1
+                elif tok == "--no-allow-unauthenticated":
+                    has_no_allow_unauth = True
+                    auth_line = line_no
+                elif tok == "--allow-unauthenticated":
+                    has_allow_unauth = True
+                    auth_line = line_no
 
-        if has_cpu_throttling_enabled or not has_no_cpu_throttling:
-            findings.append(
-                Finding(
-                    "ERROR",
-                    display_path,
-                    cpu_line,
-                    "gcloud run deploy step must include '--no-cpu-throttling' "
-                    "(and must not enable '--cpu-throttling').",
+                elif tok == "--ingress":
+                    has_ingress_flag = True
+                    ingress_line = line_no
+                    if i + 1 < len(step_tokens) and not step_tokens[i + 1][1].startswith("-"):
+                        ingress_val = _unquote(step_tokens[i + 1][1])
+                        i += 1
+                    else:
+                        ingress_val = ""
+                elif tok.startswith("--ingress="):
+                    has_ingress_flag = True
+                    ingress_line = line_no
+                    ingress_val = _unquote(tok.split("=", 1)[1])
+
+                i += 1
+
+            if has_cpu_throttling_enabled or not has_no_cpu_throttling:
+                findings.append(
+                    Finding(
+                        "ERROR",
+                        display_path,
+                        cpu_line,
+                        "gcloud run deploy step must include '--no-cpu-throttling' "
+                        "(and must not enable '--cpu-throttling').",
+                    )
                 )
-            )
 
-        if not has_exec_env_flag:
-            findings.append(
-                Finding(
-                    "ERROR",
-                    display_path,
-                    step_line,
-                    "gcloud run deploy step is missing '--execution-environment gen2'.",
+            if not has_exec_env_flag:
+                findings.append(
+                    Finding(
+                        "ERROR",
+                        display_path,
+                        step_line,
+                        "gcloud run deploy step is missing '--execution-environment gen2'.",
+                    )
                 )
-            )
-        elif exec_env_val != "gen2":
-            findings.append(
-                Finding(
-                    "ERROR",
-                    display_path,
-                    exec_env_line,
-                    f"gcloud run deploy '--execution-environment' must be 'gen2', got '{exec_env_val}'.",
+            elif exec_env_val != "gen2":
+                findings.append(
+                    Finding(
+                        "ERROR",
+                        display_path,
+                        exec_env_line,
+                        f"gcloud run deploy '--execution-environment' must be 'gen2', got '{exec_env_val}'.",
+                    )
                 )
-            )
 
-        if not has_min_instances_flag:
-            findings.append(
-                Finding(
-                    "ERROR",
-                    display_path,
-                    step_line,
-                    "gcloud run deploy step is missing '--min-instances' (must be >= 1, recommended >= 2).",
+            if not has_min_instances_flag:
+                findings.append(
+                    Finding(
+                        "ERROR",
+                        display_path,
+                        step_line,
+                        "gcloud run deploy step is missing '--min-instances' (must be >= 1, recommended >= 2).",
+                    )
                 )
-            )
-        else:
-            try:
-                min_int = int(min_instances_val or "", 10)
-                if min_int < 1:
+            else:
+                try:
+                    min_int = int(min_instances_val or "", 10)
+                    if min_int < 1:
+                        findings.append(
+                            Finding(
+                                "ERROR",
+                                display_path,
+                                min_instances_line,
+                                f"gcloud run deploy '--min-instances' must be >= 1, got {min_int}.",
+                            )
+                        )
+                    elif min_int < 2:
+                        findings.append(
+                            Finding(
+                                "WARN",
+                                display_path,
+                                min_instances_line,
+                                f"gcloud run deploy '--min-instances' is {min_int}; at least 2 is recommended for HA.",
+                            )
+                        )
+                except ValueError:
                     findings.append(
                         Finding(
                             "ERROR",
                             display_path,
                             min_instances_line,
-                            f"gcloud run deploy '--min-instances' must be >= 1, got {min_int}.",
+                            f"gcloud run deploy '--min-instances' must be an integer >= 1, got '{min_instances_val}'.",
                         )
                     )
-                elif min_int < 2:
-                    findings.append(
-                        Finding(
-                            "WARN",
-                            display_path,
-                            min_instances_line,
-                            f"gcloud run deploy '--min-instances' is {min_int}; at least 2 is recommended for HA.",
-                        )
-                    )
-            except ValueError:
+
+            if has_allow_unauth or not has_no_allow_unauth:
                 findings.append(
                     Finding(
                         "ERROR",
                         display_path,
-                        min_instances_line,
-                        f"gcloud run deploy '--min-instances' must be an integer >= 1, got '{min_instances_val}'.",
+                        auth_line,
+                        "gcloud run deploy step must include '--no-allow-unauthenticated' "
+                        "(and must not enable '--allow-unauthenticated').",
+                    )
+                )
+
+            if not has_ingress_flag:
+                findings.append(
+                    Finding(
+                        "ERROR",
+                        display_path,
+                        step_line,
+                        "gcloud run deploy step is missing '--ingress'.",
+                    )
+                )
+            elif ingress_val not in VALID_INGRESS_VALUES:
+                findings.append(
+                    Finding(
+                        "ERROR",
+                        display_path,
+                        ingress_line,
+                        f"gcloud run deploy '--ingress' must be one of {sorted(VALID_INGRESS_VALUES)}, got '{ingress_val}'.",
                     )
                 )
 
@@ -877,6 +997,15 @@ def audit_file(
     )
     if is_dockerfile:
         _audit_otel_dockerfile(display_path, lines, findings)
+        return findings
+
+    is_otel_collector_cfg = (
+        not any(re.match(r"^apiVersion\s*:", _strip_inline_comment(line)) for line in lines)
+        and any(re.match(r"^receivers\s*:", _strip_inline_comment(line)) for line in lines)
+        and any(re.match(r"^exporters\s*:", _strip_inline_comment(line)) for line in lines)
+    )
+    if is_otel_collector_cfg:
+        _audit_otel_collector_config(display_path, lines, findings)
         return findings
 
     substitutions = _extract_substitutions(lines)

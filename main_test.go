@@ -105,9 +105,9 @@ var (
 const redisUri = "redis://localhost:6379"
 
 // TestMain sets up both the in-memory mock ticket replicator and the actual
-// redis ticket replicator (using local redis and falling back to
-// testcontainers) so tests can run against both types and confirm they produce
-// the expected results.
+// redis ticket replicator (using a runner-provided REDISHOST/REDISPORT when set,
+// otherwise localhost:6379, and falling back to testcontainers) so tests can run
+// against both types and confirm they produce the expected results.
 func TestMain(m *testing.M) {
 	logrus.SetLevel(logrus.FatalLevel)
 
@@ -120,7 +120,6 @@ func TestMain(m *testing.M) {
 		if !strings.HasPrefix(uri, "redis://") {
 			uri = "redis://" + uri
 		}
-		// Attempt to connect to locally running redis
 		redisUrl, err := url.Parse(uri)
 		if err != nil {
 			testLogger.Fatalf("failed to parse connection string for redis: %s", err)
@@ -132,7 +131,15 @@ func TestMain(m *testing.M) {
 		os.Setenv("OM_REDIS_READ_PORT", redisUrl.Port())
 		os.Setenv("OM_REDIS_WRITE_PORT", redisUrl.Port())
 	}
-	redisConfig(redisUri)
+	initialRedisURI := redisUri
+	if envHost := strings.TrimSpace(os.Getenv("REDISHOST")); envHost != "" {
+		envPort := strings.TrimSpace(os.Getenv("REDISPORT"))
+		if envPort == "" {
+			envPort = "6379"
+		}
+		initialRedisURI = "redis://" + net.JoinHostPort(envHost, envPort)
+	}
+	redisConfig(initialRedisURI)
 	cfg = config.Read() // Read env vars into config
 
 	// Configure metrics once before any background cache replication goroutines start.
@@ -154,10 +161,10 @@ func TestMain(m *testing.M) {
 	} else {
 		rr, err := redisReplicator.New(cfg)
 		if err == nil {
-			testLogger.Infof("Connection to local redis returned no error")
+			testLogger.Infof("Connection to configured redis returned no error")
 		} else {
 			// do a redis testcontainer instead
-			testLogger.Infof("Unable to connect to local redis; falling back to testcontainer")
+			testLogger.Infof("Unable to connect to configured redis; falling back to testcontainer")
 			redisContainer, err := redis.RunContainer(ctx,
 				// Latest Redis containers fail with
 				//	"# Fatal: Can't initialize Background Jobs. Error message: Operation not permitted"
@@ -165,6 +172,8 @@ func TestMain(m *testing.M) {
 				//testcontainers.WithImage("redis:latest"))
 				//
 				// This is the latest version that works in my limited testing.
+				// End users may change this testcontainers image tag locally to try later
+				// Redis versions, which are untested and unsupported.
 				testcontainers.WithImage("redis:7.0.10"))
 			if err != nil {
 				log.Fatalf("failed to start redis container: %s", err)
@@ -2843,27 +2852,6 @@ func TestParseMmfUrlTableAndSchemelessInvocation(t *testing.T) {
 	})
 }
 
-// Scenario 21: OTel Collector Sidecar Dockerfile and Config Verification
-func TestOTelCollectorSidecarDockerfileAndConfig(t *testing.T) {
-	dockerfileBytes, err := os.ReadFile("deploy/cloud_run/otel-collector-sidecar/Dockerfile")
-	require.NoError(t, err)
-	dockerfile := string(dockerfileBytes)
-
-	assert.Contains(t, dockerfile, "/etc/otelcol-google/config.yaml")
-	assert.Contains(t, dockerfile, "/etc/otelcol-contrib/config.yaml")
-	for _, line := range strings.Split(dockerfile, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(strings.ToUpper(trimmed), "ENTRYPOINT") {
-			assert.Contains(t, trimmed, "--config", "Dockerfile must not specify a bare ENTRYPOINT without --config")
-		}
-	}
-
-	configBytes, err := os.ReadFile("deploy/cloud_run/otel-collector-sidecar/config.yaml")
-	require.NoError(t, err)
-	configContent := string(configBytes)
-	assert.Contains(t, configContent, "googlemanagedprometheus")
-}
-
 type delayedCatchUpReplicator struct {
 	mu        sync.Mutex
 	calls     int
@@ -3341,49 +3329,3 @@ func TestOpenTelemetryServiceVersionAndInitializer(t *testing.T) {
 	_ = shutdown(shutCtx)
 }
 
-// Scenario 25: Cloud Run Deployment Manifest Flags Verification
-func TestCloudRunDeploymentManifestFlags(t *testing.T) {
-	// 1. ci.yaml
-	ciBytes, err := os.ReadFile("ci.yaml")
-	require.NoError(t, err)
-	ciContent := string(ciBytes)
-	assert.Contains(t, ciContent, "--no-cpu-throttling")
-	assert.Contains(t, ciContent, "--execution-environment")
-	assert.Contains(t, ciContent, "gen2")
-	assert.Contains(t, ciContent, "--min-instances")
-	assert.Contains(t, ciContent, "\"2\"")
-	assert.Contains(t, ciContent, "--no-allow-unauthenticated")
-	assert.Contains(t, ciContent, "--ingress")
-
-	// 2. deploy/cloud_run/cloudbuild.yaml
-	cbBytes, err := os.ReadFile("deploy/cloud_run/cloudbuild.yaml")
-	require.NoError(t, err)
-	cbContent := string(cbBytes)
-	assert.Contains(t, cbContent, "--no-cpu-throttling")
-	assert.Contains(t, cbContent, "--execution-environment")
-	assert.Contains(t, cbContent, "gen2")
-	assert.Contains(t, cbContent, "--min-instances")
-	assert.Contains(t, cbContent, "\"2\"")
-	assert.Contains(t, cbContent, "--no-allow-unauthenticated")
-	assert.Contains(t, cbContent, "--ingress")
-	assert.Contains(t, cbContent, "internal")
-
-	// 3. deploy/cloud_run/service.yaml
-	svcBytes, err := os.ReadFile("deploy/cloud_run/service.yaml")
-	require.NoError(t, err)
-	svcContent := string(svcBytes)
-	assert.Contains(t, svcContent, "run.googleapis.com/cpu-throttling: 'false'")
-	assert.Contains(t, svcContent, "run.googleapis.com/execution-environment: gen2")
-	assert.Contains(t, svcContent, "autoscaling.knative.dev/minScale: '2'")
-	assert.Contains(t, svcContent, "run.googleapis.com/ingress: internal")
-
-	// 4. .agents/skills/open_match2/SKILL.md
-	skillBytes, err := os.ReadFile(".agents/skills/open_match2/SKILL.md")
-	require.NoError(t, err)
-	skillContent := string(skillBytes)
-	assert.Contains(t, skillContent, "--no-cpu-throttling")
-	assert.Contains(t, skillContent, "run.googleapis.com/cpu-throttling: 'false'")
-	assert.Contains(t, skillContent, "gen2")
-	assert.Contains(t, skillContent, "autoscaling.knative.dev/minScale: '2'")
-	assert.Contains(t, skillContent, "run.googleapis.com/ingress: internal")
-}

@@ -10,6 +10,9 @@ A: まずは`om_core.cache.replication.lag`を監視してください。この�
 
 高スループットまたはバースト性の高いマッチメイキングワークロードにおいて、最も効果的な最初のステップは、`OM_CACHE_PACK_TICKET_STATE_UPDATES=true`を設定してチケット状態更新のパッキングを有効にすることです（必要に応じて`OM_CACHE_OUT_MAX_PACKED_KEYS`も調整します。デフォルトは`500`）。これにより、連続するチケットのアクティブ化および非アクティブ化操作（複数の呼び出し元からの同時リクエストを含む）が複数キーを持つRedis Streamエントリに統合（パッキング）され、送信時の書き込みオーバーヘッドと受信ストリームのエントリ数の両方が大幅に削減されます。
 
+> [!IMPORTANT]
+> マッチメーカーの**デプロイメントとはスタック全体を指します**（Redisインスタンス、`om-core`インスタンス群、MMF、マッチメイキングキュー、およびDirector）。デプロイメント内のすべての`om-core`インスタンスは同じバージョンかつ同じ`OM_CACHE_PACK_TICKET_STATE_UPDATES`設定で実行される必要があり、ライブ（ローリング）での設定変更やロールバックはいずれの方向でもサポートされていません（`v2.0.x`はパッキングされたエントリの最初のIDのみを読み取り、残りを無言で破棄します）。`OM_CACHE_PACK_TICKET_STATE_UPDATES`の有効化・無効化は、**新しいRedisインスタンスを含むスタック全体のブルーグリーンデプロイメント**（または新しいRedisインスタンスを用いたメンテナンスウィンドウ）によって実施してください。詳細は[パッキングされたチケット状態更新の有効化と無効化](ADVANCED.md#パッキングされたチケット状態更新の有効化と無効化)を参照してください。
+
 それでも`om_core.cache.replication.lag`が高い場合は、以下の4つのボトルネックシナリオに沿ってパイプラインの該当ステージを特定し、チューニングできます：
 
 1. **受信ポーリングの遅延（Slow Incoming Polling）**:
@@ -20,7 +23,7 @@ A: まずは`om_core.cache.replication.lag`を監視してください。この�
    * **チューニング**: `OM_CACHE_IN_SLEEP_BETWEEN_APPLYING_UPDATES_MS`（デフォルト`500`ミリ秒）および`OM_CACHE_IN_FULL_APPLY_SLEEP_MS`（デフォルト`100`ミリ秒）を下げ、`OM_CACHE_IN_MAX_APPLY_DURATION_MS`（デフォルト`500`ミリ秒）または`OM_CACHE_IN_QUEUE_BUFFER_SIZE`（デフォルト`20000`）を増やし、コンテナに常時CPUが割り当てられていることを確認してください（例：Cloud Runでの`--no-cpu-throttling`）。なお、適用サイクル間のスリープ時間を短縮すると、APIリクエスト処理に使えるCPU時間がその分減少するトレードオフがある点に注意してください。
 3. **送信キューの競合（Outgoing Queue Contention）**:
    * **兆候**: `om_core.cache.outgoing.backlog`や`om_core.cache.outgoing.queue.wait`が高い、`om_core.cache.outgoing.maxqueuethresholdreached`が急増している、または`om_core.cache.outgoing.send.duration`が高い。
-   * **チューニング**: `OM_CACHE_PACK_TICKET_STATE_UPDATES=true`を有効にし（必要に応じて`OM_CACHE_OUT_MAX_PACKED_KEYS`を調整）、`OM_CACHE_OUT_MAX_QUEUE_THRESHOLD`（デフォルト`50`）および`OM_CACHE_OUT_QUEUE_BUFFER_SIZE`（デフォルト`500`）を増やすか、`OM_CACHE_OUT_WAIT_TIMEOUT_MS`（デフォルト`500`ミリ秒）を下げて部分バッチがより早くフラッシュされるようにします。
+   * **チューニング**: 新しいデプロイメントを介して`OM_CACHE_PACK_TICKET_STATE_UPDATES=true`を有効にし（[パッキングされたチケット状態更新の有効化と無効化](ADVANCED.md#パッキングされたチケット状態更新の有効化と無効化)を参照、必要に応じて`OM_CACHE_OUT_MAX_PACKED_KEYS`を調整）、`OM_CACHE_OUT_MAX_QUEUE_THRESHOLD`（デフォルト`50`）および`OM_CACHE_OUT_QUEUE_BUFFER_SIZE`（デフォルト`500`）を増やすか、`OM_CACHE_OUT_WAIT_TIMEOUT_MS`（デフォルト`500`ミリ秒）を下げて部分バッチがより早くフラッシュされるようにします。
 4. **MMF準備時間または非アクティブ化待機時間の増加（High MMF Prep or Deactivation Wait）**:
    * **兆候**: MMF呼び出し前の`om_core.mmf.prep.duration`が高い、またはMMFがマッチを返した後の`om_core.mmf.deactivation.wait`が高く`om_core.mmf.deactivation.timeouts`が増加している。
    * **チューニング**: `om_core.mmf.prep.duration`が高い場合、`InvokeMatchmakingFunctions`がアクティブチケットのフィルタリングとプールのチャンキングに多くの時間を費やしています。より狭いプールフィルターを持つ複数のプロファイルに分割し、`OM_CACHE_TICKET_TTL_MS`を適切に短く保ってください。`om_core.mmf.deactivation.wait`や`om_core.mmf.deactivation.timeouts`が高い場合は、送信書き込みと受信適用の往復レプリケーション遅延を反映しているため、上記の送信・受信チューニングを適用した上で、レイテンシ要件に合わせて`OM_MATCH_TICKET_DEACTIVATION_TIMEOUT_MS`（デフォルト`60000`ミリ秒）を調整してください。
@@ -61,11 +64,11 @@ A: 部分的に空いている実行中のゲームサーバーを埋めるた�
 
 **Q: 作成直後にチケットの有効期限が切れました。何が起こったのですか？**
 
-A: Open Matchは常にチケットの有効期限をその`creation_time`に基づいて計算します。もし非常に古い`creation_time`（例えば、1970年1月1日のUNIXエポック）を手動で提供し、デフォルトのTTLが10分である場合、チケットは作成された瞬間に有効期限切れと見なされます。
+A: `CreateTicket`で作成されたすべてのチケットは`inactive`（非アクティブ）状態で開始され、`ActivateTickets`の呼び出し後にのみプールに入ります（`v2.0.x`から変更ありません）。また、チケットは**アクティブであるか非アクティブであるかにかかわらず**、その有効期限時刻に達すると期限切れになります。有効期限時刻のデフォルトは作成時刻に`OM_CACHE_TICKET_TTL_MS`（`internal/config/config.go`で定義）を加算した時刻であり、より早い時刻を設定することはできますが、現在時刻にそのTTLを加算した時刻より後に設定することはできません。そのため、`expiration_time`を省略したまま非常に古い`creation_time`（例えば1970年1月1日のUNIXエポック）を指定し、デフォルトのTTLが10分である場合、算出される有効期限時刻がすでに過去となるため、アクティブか非アクティブかを問わず即座に期限切れになります。
 
 **Q: チケットの有効期限切れを防ぐために、非常に長いTTLを設定してもよいですか？また、`OM_CACHE_TICKET_TTL_MS`の適切な値はどのように計算すべきですか？**
 
-A: エッジケースや「いつまでも終わらない」キューを処理するためにこの設定を使用しないでください。TTLが長すぎると、正常にマッチングした（非アクティブな）チケットが、TTLが切れるまでシステムメモリ内に蓄積され続けることになり、負荷とメモリ圧迫の原因となります。この値は、プレイヤーベースの95%（正規分布を仮定）がマッチを見つけるのにかかる時間よりも「少しだけ長く」設定すべきですが、それ以上長くしてはいけません。
+A: エッジケースや「いつまでも終わらない」キューを処理するためにこの設定を使用しないでください。チケットはアクティブか非アクティブかにかかわらず有効期限時刻（デフォルトは作成時刻 + `internal/config/config.go`で定義された`OM_CACHE_TICKET_TTL_MS`）に達すると期限切れになるため、TTLが長すぎると、マッチング済みの（非アクティブな）チケットが有効期限に達するまでメモリ内に蓄積され続け、負荷とメモリ圧迫の原因となります。この値は、プレイヤーベースの95%（正規分布を仮定）がマッチを見つけるのにかかる時間よりも「少しだけ長く」設定すべきですが、それ以上長くしてはいけません。
 
 この数値を導き出すための実践的な例を挙げます：
 
@@ -104,6 +107,10 @@ A: これはほとんどの場合、ネットワークの問題です。Open Mat
 **Q: gRPC-gatewayを使用していて、クライアントが`InvokeMMFs`からのレスポンスのアンマーシャルに失敗します。**
 
 A: これはgRPC-gatewayの動作に関する見落としやすい詳細です。gRPC-gatewayは、実際のレスポンスペイロードを、キー`"result"`の下の親JSONオブジェクト内にラップします。レスポンスをアンマーシャルする際には、protobufのJSONアンマーシャラーに渡す前に、まず`"result"`キーの内容を抽出する必要があります。
+
+**Q: Cloud Run上で、MMFの処理やマッチチケットの非アクティブ化が完了する前に`InvokeMatchmakingFunctions`のストリームが切断されてしまいます。なぜですか？**
+
+A: Cloud Runリビジョンのリクエストタイムアウト（`deploy/cloud_run/service.yaml`の`timeoutSeconds`または`gcloud run deploy`の`--timeout`、リポジトリのテンプレートではデフォルト`900`秒）を確認してください。Cloud Runのリクエストタイムアウトが`om-core`のMMF実行時間とチケット非アクティブ化待機時間の合計より短い場合、Cloud Run側でストリーミングリクエストが途中で切断されます。Cloud Runのリクエストタイムアウトは、少なくとも`OM_MMF_TIMEOUT_SECS` + `OM_MATCH_TICKET_DEACTIVATION_TIMEOUT_MS` ÷ 1000以上である必要があります。これらはいずれも`internal/config/config.go`で定義されており、環境変数で上書き可能です。`internal/config/config.go`に設定されたデフォルトのタイムアウト値では660秒になります。Cloud Runの最大値は3600秒です。
 
 #### **責任の分担**
 

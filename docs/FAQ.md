@@ -12,6 +12,9 @@ A: Start by monitoring `om_core.cache.replication.lag`, which measures the end-t
 
 For high-throughput or bursty matchmaking workloads, the most impactful first step is enabling packed ticket state updates by setting `OM_CACHE_PACK_TICKET_STATE_UPDATES=true` (and optionally tuning `OM_CACHE_OUT_MAX_PACKED_KEYS`, default `500`). This coalesces contiguous ticket activation and deactivation operations—including concurrent requests across callers—into multi-key Redis Stream entries, substantially reducing both outgoing write overhead and incoming stream entry volume.
 
+> [!IMPORTANT]
+> A matchmaker **deployment is the entire stack**: the Redis instance, the `om-core` instances, the MMFs, the matchmaking queue (frontend), and the Director. Every `om-core` instance in a deployment must run the same version with the same `OM_CACHE_PACK_TICKET_STATE_UPDATES` setting, and live (rolling) upgrades or rollbacks of the setting are not supported in either direction (`v2.0.x` reads only the first ID of a packed entry and silently drops the rest). Enable or disable `OM_CACHE_PACK_TICKET_STATE_UPDATES` via a **blue-green deployment of the whole stack (including a new Redis instance)**, or during a maintenance window with a fresh Redis instance. See [Enabling or Disabling Packed Ticket State Updates](ADVANCED.md#enabling-or-disabling-packed-ticket-state-updates).
+
 If `om_core.cache.replication.lag` remains elevated, you can isolate and tune the specific stage of the pipeline using the following four bottleneck scenarios:
 
 1. **Slow Incoming Polling**:
@@ -22,7 +25,7 @@ If `om_core.cache.replication.lag` remains elevated, you can isolate and tune th
    * **Tuning**: Lower `OM_CACHE_IN_SLEEP_BETWEEN_APPLYING_UPDATES_MS` (default `500` ms) and `OM_CACHE_IN_FULL_APPLY_SLEEP_MS` (default `100` ms), increase `OM_CACHE_IN_MAX_APPLY_DURATION_MS` (default `500` ms) or `OM_CACHE_IN_QUEUE_BUFFER_SIZE` (default `20000`), and ensure the container has always-on CPU allocated (e.g., `--no-cpu-throttling` on Cloud Run). Be aware that reducing applier sleep leaves slightly less CPU time for handling API requests.
 3. **Outgoing Queue Contention**:
    * **Symptoms**: `om_core.cache.outgoing.backlog` and `om_core.cache.outgoing.queue.wait` are elevated, `om_core.cache.outgoing.maxqueuethresholdreached` climbs rapidly, or `om_core.cache.outgoing.send.duration` is high.
-   * **Tuning**: Enable `OM_CACHE_PACK_TICKET_STATE_UPDATES=true` (and tune `OM_CACHE_OUT_MAX_PACKED_KEYS`), increase `OM_CACHE_OUT_MAX_QUEUE_THRESHOLD` (default `50`) and `OM_CACHE_OUT_QUEUE_BUFFER_SIZE` (default `500`), or lower `OM_CACHE_OUT_WAIT_TIMEOUT_MS` (default `500` ms) so smaller batches flush sooner.
+   * **Tuning**: Enable `OM_CACHE_PACK_TICKET_STATE_UPDATES=true` via a new deployment (see [Enabling or Disabling Packed Ticket State Updates](ADVANCED.md#enabling-or-disabling-packed-ticket-state-updates), and optionally tune `OM_CACHE_OUT_MAX_PACKED_KEYS`), increase `OM_CACHE_OUT_MAX_QUEUE_THRESHOLD` (default `50`) and `OM_CACHE_OUT_QUEUE_BUFFER_SIZE` (default `500`), or lower `OM_CACHE_OUT_WAIT_TIMEOUT_MS` (default `500` ms) so smaller batches flush sooner.
 4. **High MMF Prep or Deactivation Wait**:
    * **Symptoms**: `om_core.mmf.prep.duration` is high before MMFs are invoked, or `om_core.mmf.deactivation.wait` is high and `om_core.mmf.deactivation.timeouts` increments after MMFs return matches.
    * **Tuning**: High `om_core.mmf.prep.duration` means `InvokeMatchmakingFunctions` is spending significant time filtering active tickets and chunking pools—favor more profiles with narrower pool filters and keep `OM_CACHE_TICKET_TTL_MS` tight. High `om_core.mmf.deactivation.wait` or `om_core.mmf.deactivation.timeouts` reflects round-trip outgoing write plus incoming apply latency; apply the outgoing and incoming tuning steps above and adjust `OM_MATCH_TICKET_DEACTIVATION_TIMEOUT_MS` (default `60000` ms) to match your latency budget.
@@ -67,11 +70,11 @@ A: If you have profiles designed to fill partially-empty, running game servers, 
 
 **Q: My ticket expired immediately after I created it. What happened?**
 
-A: Open Match always calculates a ticket's expiration time based on its `creation_time`. If you manually provide a `creation_time` that is very old (e.g., the Unix epoch of January 1st, 1970\) and the default TTL is 10 minutes, the ticket will be considered expired the moment it is created.
+A: Every ticket created via `CreateTicket` starts `inactive` and only enters matchmaking pools after `ActivateTickets` (unchanged from `v2.0.x`), and tickets expire at their expiration time **whether active or inactive**. The expiration time defaults to creation time plus `OM_CACHE_TICKET_TTL_MS` (defined in `internal/config/config.go`); it may be set earlier, but never later than `now` plus that TTL. If you omit `expiration_time` and manually provide a `creation_time` that is very old (e.g., the Unix epoch of January 1st, 1970) with a 10-minute default TTL, the computed expiration time is already in the past, so the ticket expires immediately whether it is active or inactive.
 
 **Q: Can I just set a really long TTL to prevent tickets from expiring?  How should I calculate the correct value for `OM_CACHE_TICKET_TTL_MS?`**
 
-A: Do not use this setting to handle edge cases or "forever" queues. A TTL that is too long will cause successfully matched (inactive) tickets to accumulate in the system memory until their TTL expires, which increases load and memory pressure. You should set this value to be slightly longer than the time it takes to find a match for 95% of your player base (assuming a normal distribution), but no longer.
+A: Do not use this setting to handle edge cases or "forever" queues. Because tickets expire at their expiration time whether active or inactive (defaulting to creation time plus `OM_CACHE_TICKET_TTL_MS`, defined in `internal/config/config.go`), a TTL that is too long will cause matched (inactive) tickets to accumulate in memory until their expiration time is reached, increasing load and memory pressure. You should set this value to be slightly longer than the time it takes to find a match for 95% of your player base (assuming a normal distribution), but no longer.
 
 A practical example of how to derive this number:
 
@@ -112,6 +115,10 @@ A: This is almost always a networking issue. Check to ensure that the service wh
 **Q: I'm using the gRPC-gateway and my client is failing to unmarshal the response from `InvokeMMFs`.**
 
 A: This is an easy-to-miss detail of how the gRPC-gateway works. It wraps the actual response payload inside a parent JSON object under the key `"result"`. When you are unmarshalling the response, you need to extract the content of the `"result"` key first before passing it to your protobuf JSON unmarshaller.
+
+**Q: On Cloud Run, my `InvokeMatchmakingFunctions` streams are getting cut off before MMFs finish or match ticket deactivations complete. Why?**
+
+A: Check your Cloud Run revision's request timeout (`timeoutSeconds` in `deploy/cloud_run/service.yaml` or `--timeout` on `gcloud run deploy`, which defaults to `900` s in the repository templates). If Cloud Run's request timeout is shorter than `om-core`'s MMF execution plus ticket-deactivation wait budget, Cloud Run terminates the streaming request mid-flight. The Cloud Run request timeout must be at least `OM_MMF_TIMEOUT_SECS` + `OM_MATCH_TICKET_DEACTIVATION_TIMEOUT_MS` ÷ 1000. Both are defined in `internal/config/config.go` and overridable by environment variables. With the default timeouts set in `internal/config/config.go`, that is 660 s. The Cloud Run maximum is 3600 s.
 
 ---
 

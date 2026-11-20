@@ -17,9 +17,9 @@ Each `om-core` process runs two tightly coupled network listeners in `server.go`
    - Enforces `ReadHeaderTimeout: 10 * time.Second` on the `http.Server` to mitigate Slowloris-style header stalls.
    - Fails fast via `logger.Fatalf` if binding either `OM_GRPC_PORT` or `PORT` fails on startup.
 3. **Signal-Aware Lifecycle and Bounded Graceful Shutdown**:
-   - Listens for `syscall.SIGTERM` and `syscall.SIGINT` (or parent context cancellation) via `signal.NotifyContext`.
-   - On termination, derives a 5-second shutdown context, calls `httpServer.Shutdown(shutdownCtx)`, and runs `omServer.GracefulStop()` in a helper goroutine—falling back to `omServer.Stop()` if the 5-second deadline expires before all active streams drain.
-   - `main()` also defers a 5-second timeout context for `otelShutdownFunc` and calls `Close()` on the Redis replicator (`rConnPool` and `wConnPool`).
+   - `start` registers the `grpc-gateway` handler with a cancellable child of `context.WithoutCancel(parentCtx)` (`gwCtx`) so `SIGTERM` / parent cancellation does not close the loopback gRPC client connection while in-flight HTTP REST requests are still running.
+   - On termination, `start` derives a 5-second drain deadline (`serverDrainTimeout = 5 * time.Second`), drains `httpServer.Shutdown(shutdownCtx)` first while `gwCtx` remains open, then cancels `gwCtx`, and then runs `omServer.GracefulStop()` (falling back to `omServer.Stop()` if the shared 5-second deadline expires).
+   - After `start` returns, `main()` cancels the detached replication context (`context.WithoutCancel(ctx)`) and waits up to `replicationStopTimeout = 3 * time.Second` for `OutgoingReplicationQueue` and `IncomingReplicationQueue` (which joins its storage-poller and expiration-ticker goroutines before returning) before closing the replicator and flushing OpenTelemetry—fitting within Cloud Run's 10-second `SIGTERM`-to-`SIGKILL` window.
 
 ---
 
@@ -49,7 +49,7 @@ Each `om-core` process runs two tightly coupled network listeners in `server.go`
 ### Core Protobuf Messages (`proto/messages.proto`)
 - **`Ticket`**:
   - `id` (`string`): Populated by state storage on `CreateTicket` (`^\d{13}-\d+$`). Any user-supplied `id` in `CreateTicketRequest` is logged as a warning and overwritten.
-  - `expiration_time` (`google.protobuf.Timestamp`): Optional custom expiration timestamp. Must fall strictly within `(now, now + OM_CACHE_TICKET_TTL_MS]`; otherwise `CreateTicket` rejects the ticket with `codes.InvalidArgument` (`"specified expiration time not between (now, now + <ttl>)"`). When omitted (`nil`), `om-core` sets `expiration_time = attributes.creation_time + OM_CACHE_TICKET_TTL_MS`.
+  - `expiration_time` (`google.protobuf.Timestamp`): Every ticket created via `CreateTicket` starts `inactive` and only enters pools after `ActivateTickets` (unchanged from `v2.0.x`), and tickets expire at their expiration time **whether active or inactive**. The expiration time defaults to creation time plus `OM_CACHE_TICKET_TTL_MS` (defined in `internal/config/config.go`); it may be set earlier (must fall strictly after `now`), but never later than `now` plus that TTL (`codes.InvalidArgument`: `"specified expiration time not between (now, now + <ttl>)"`).
   - `attributes` (`Ticket.FilterableData`): Indexed fields evaluated by pool filters:
     - `tags` (`repeated string`): Matched by `Pool.TagPresentFilter`.
     - `string_args` (`map<string, string>`): Matched by `Pool.StringEqualsFilter`.
@@ -142,22 +142,23 @@ Given `mmf *pb.MatchmakingFunctionSpec`:
 ### ReplicatedTicketCache (`internal/statestore/cache`)
 1. **Materialized `ActiveTickets` Index**:
    - `ActiveTickets` (`sync.Map`) stores only currently active `*pb.Ticket` pointers:
-     - `store.Ticket`: Inserts into `Tickets` and (unless pre-deactivated in `InactiveSet`) into `ActiveTickets`.
+     - `store.Ticket`: Inserts into `Tickets` and goes into `InactiveSet` (incrementing `liveInactive` only on first insertion) and `inactiveHeap` (keyed by the creation timestamp parsed from the replication ID), **never** into `ActiveTickets` until activated via `store.Activate` (if a duplicate creation event arrives for an already-active ID, it only replaces the stored `*pb.Ticket` pointer in `ActiveTickets` without changing state or counters).
      - `store.Activate`: Deletes from `InactiveSet` and, if present in `Tickets`, inserts into `ActiveTickets`.
      - `store.Deactivate`: Deletes from `ActiveTickets` and inserts into `InactiveSet`.
    - `SnapshotActiveTickets()` ranges over `ActiveTickets` lock-free in $O(\text{active tickets})$ time without scanning `InactiveSet`.
 2. **Outgoing Batching and Cross-Caller Request Coalescing (`OutgoingReplicationQueue`)**:
    - Collects up to `OM_CACHE_OUT_MAX_QUEUE_THRESHOLD` requests within `OM_CACHE_OUT_WAIT_TIMEOUT_MS`.
    - When `OM_CACHE_PACK_TICKET_STATE_UPDATES=true`, contiguous `Activate` or `Deactivate` requests across concurrent callers are coalesced into packed updates (up to `OM_CACHE_OUT_MAX_PACKED_KEYS` unique non-empty keys in first-seen order). Interleaved `Ticket`/`Assign` commands or switching between `Activate` and `Deactivate` flushes the run to preserve strict causal ordering, and empty-key requests are isolated so they cannot fail adjacent valid callers.
+   - **No Mixed Deployments or Live Setting Changes**: Every `om-core` instance in a matchmaker deployment (the entire stack: Redis, `om-core`, MMFs, matchmaking queue, and Director) must run the same version with the same `OM_CACHE_PACK_TICKET_STATE_UPDATES` setting (`v2.0.x` reads only the first ID of a packed entry and silently drops the rest). Live (rolling) upgrades and rollbacks of the setting are not supported in either direction; enable or disable packing only via a new whole-stack blue-green deployment (including a new Redis instance) or a maintenance window with a fresh Redis instance.
    - Drains all remaining buffered `UpRequests` before exiting when `ctx.Done()` closes.
 3. **Cold-Start Catch-Up Barrier (`IsCaughtUp` / `WaitForCatchUp`)**:
    - During startup, the incoming poller tracks `totalPolled` updates. On the first non-full poll (`len(updates) < OM_CACHE_IN_MAX_UPDATES_PER_POLL`), `catchUpTarget` transitions from `-1` to `totalPolled` and wakes the applier immediately via a 1-buffered wake channel. Once `totalApplied >= catchUpTarget`, the readiness channel closes and `IsCaughtUp()` returns `true`.
 4. **Event-Driven Deactivation Watermark (`WaitForDeactivation`)**:
    - After each incoming apply cycle, the cache updates `appliedReplId` under `watermarkMu` and closes/replaces `watermarkNotify` (`chan struct{}`) to wake all waiting goroutines without 100ms polling sleeps.
 5. **Asynchronous Chunked Min-Heap TTL Expiration (`expireCacheEntries`)**:
-   - Runs on an asynchronous ticker every `OM_CACHE_EXPIRATION_INTERVAL_MS` (default `1000` ms) across three min-heaps ordered by millisecond deadline (`inactiveHeap`, `ticketHeap` for custom earlier `ExpirationTime`, and `assignmentHeap`).
+   - Runs on an asynchronous ticker every `OM_CACHE_EXPIRATION_INTERVAL_MS` (default `1000` ms) across three min-heaps ordered by millisecond deadline: `inactiveHeap` (Pass 1, inactive TTL), `ticketExpHeap` (Pass 2, tracking **every** ticket's valid `ExpirationTime`, **whether active or inactive**), and `assignmentHeap` (Pass 3).
    - Acquires `cacheMu` in bounded chunks of at most **256 heap pop operations** up to `OM_CACHE_EXPIRATION_MAX_DELETES_PER_CYCLE` (default `5000`) deletions per cycle.
-   - **Re-activation & Resurrection Safety**: When popping from `inactiveHeap`, verifies the ticket ID is still in `InactiveSet` (skipping re-activated tickets) and deletes from `ActiveTickets` and `Tickets` **before** deleting from `InactiveSet`.
+   - **Re-activation, Clock-Skew & Inactive-Set Safety**: Every valid `ExpirationTime` is scheduled on `ticketExpHeap` unconditionally without comparing the `om-core` expiration clock against the state-storage replication ID clock. Pass 1 (`inactiveHeap`) verifies the ticket ID is still in `InactiveSet` (skipping activated tickets) and deletes from `ActiveTickets` and `Tickets` before deleting from `InactiveSet`. Pass 2 (`ticketExpHeap`) evicts expired active and inactive tickets alike, removing each from `ActiveTickets`, `Tickets`, and `InactiveSet` (decrementing `liveInactive` and counting inactive deletions when present).
 
 ---
 
@@ -169,7 +170,7 @@ Given `mmf *pb.MatchmakingFunctionSpec`:
 | **Client Protocol & Load Balancing** | Direct gRPC connections requiring client-side gRPC load balancing. | Dual gRPC (`OM_GRPC_PORT`) and HTTP/JSON `grpc-gateway` (`PORT`), enabling standard cloud L7 HTTP load balancers and Cloud Run autoscaling. |
 | **Ticket Querying** | `om-query` queried Redis directly on every MMF pool query (`QueryPools`). | Local in-memory `ReplicatedTicketCache` with lock-free `ActiveTickets` index synchronized via Redis Streams (`om-replication`) and Redis read replicas. |
 | **Ticket ID Generation** | Optional client-provided or UUID ticket IDs. | Server-assigned Redis Stream entry IDs (`<13-digit-ms>-<seq>`). Custom IDs are stored in `Ticket.attributes.string_args` or `Ticket.extensions`. |
-| **Ticket Lifecycle & Deletion** | Tickets started active on creation; required explicit `DeleteTicket` calls to avoid leaks. | Tickets start **`inactive`** on `CreateTicket`, enter pools via `ActivateTickets`, are automatically deactivated on match return, and auto-expire via min-heap TTL and Redis `XTRIM`. |
+| **Ticket Lifecycle & Deletion** | Tickets started active on creation; required explicit `DeleteTicket` calls to avoid leaks. | Every ticket created via `CreateTicket` starts **`inactive`** and only enters pools after `ActivateTickets` (unchanged from `v2.0.x`), is automatically deactivated on match return, and expires at its expiration time **whether active or inactive** (defaulting to creation time plus `OM_CACHE_TICKET_TTL_MS` in `internal/config/config.go`; may be set earlier, never later than `now` plus that TTL) via min-heap sweeps and Redis `XTRIM`. |
 | **Match Collision Resolution** | Framework-managed synchronization window (`om-synchronizer`) and mandatory `om-evaluator` service. | No synchronization window or evaluator inside `om-core`; MMFs return final matches directly, and the Director de-collides overlapping tickets and re-activates discarded match tickets. |
 | **Matchmaking RPC Contract** | Unary/server-streaming `FetchMatches` -> MMF queried `om-query` via `QueryPools`. | Server-streaming `InvokeMatchmakingFunctions(MmfRequest)` -> `om-core` pushes 4 MB `ChunkedMmfRunRequest` stream to `mmf.Run` and fans matches back in real time. |
 | **Assignment Delivery** | Client long-polling via `GetAssignments` on `om-frontend` after Director called `AssignTickets`. | Director pushes assignments directly to the game's client notification service (`CreateAssignments` / `WatchAssignments` are deprecated compatibility stubs). |

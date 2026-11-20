@@ -19,6 +19,8 @@ image=$(gcloud config get artifacts/location)-docker.pkg.dev/$(gcloud config get
 ```
 There is no `cloudbuild.yaml` or `Dockerfile` required for a pack build. [Google Cloud's buildpacks](https://cloud.google.com/docs/buildpacks/overview) takes care of everything.
 
+The `go 1.27.4` directive in `go.mod` specifies the **minimum Go toolchain version, not a pin**: Google Cloud Buildpacks build with the newest available Go release by default, and no buildpack Go-version pin (`project.toml` or `GOOGLE_GO_VERSION`) is checked into the repository. If a newly released Go version breaks your build, you can pin locally at build time using the buildpack Go-version environment variable (`GOOGLE_GO_VERSION`, e.g., `--build-env-vars GOOGLE_GO_VERSION=1.27.4`).
+
 ### For Maintainers
 
 The following represent best practices when doing a new release:
@@ -33,7 +35,7 @@ Step #1: [builder] 2025/08/27 06:00:39 [DEBUG] GET https://go.dev/dl/?mode=json
 Step #1: [builder] ***** CACHE MISS: "go"
 Step #1: [builder] Installing Go v1.24.6.
 ``` 
-use the lower of these two versions in the `go.mod` files in Open Match 2 related projects (`go mod edit -go=<VERSION>`). This is to ensure that users following the instructions to build in their own projects can do their own builds using the default Cloud Shell environment and the latest Google Cloud buildpacks.
+set the minimum Go version in `go.mod` (`go mod edit -go=<VERSION>`, currently `1.27.4`) without adding a repository-level buildpack Go pin. This ensures that users following the instructions to build in their own projects can build using Cloud Shell and the latest Google Cloud Buildpacks while preserving the ability to pin locally via `GOOGLE_GO_VERSION` if needed.
 * When upgrading dependencies, upgrade **direct dependencies only** (avoiding a blanket `go get -u ./...` across indirect dependencies), and then run `go mod tidy`, `go vet ./...`, and `go test -race ./...` to verify that everything builds and passes cleanly before committing changes to `go.mod` and `go.sum`.
 
 ## Deploy
@@ -48,9 +50,11 @@ With the `deploy/cloud_run/service.yaml` file populated with everything you've c
 ```
 gcloud run services replace deploy/cloud_run/service.yaml
 ```
-If you instead intend to use the `deploy/cloud_run/cloudbuild.yaml` file populated with everything you've configured, you can deploy the service with a command like the one listed in the comment at the top of `deploy/cloud_run/cloudbuild.yaml` (requires you to have enabled Cloud Build and have appropriate service account permissions):
+If you instead intend to use the `deploy/cloud_run/cloudbuild.yaml` file populated with everything you've configured, you can deploy the service with a command like the one listed in the comment at the top of `deploy/cloud_run/cloudbuild.yaml` (requires you to have enabled Cloud Build and have appropriate service account permissions).
 
-You may need to adjust the scaling configuration and amount of memory `om-core` is allowed to use depending on your matchmaker.
+The Cloud Run manifests default to `OM_LOGGING_LEVEL=info`, `2` CPU and `1Gi` (`1` GiB) memory limits on the `core` container, and a `900` s request timeout (`timeoutSeconds: 900` / `--timeout 900`). The Cloud Run request timeout must be at least `OM_MMF_TIMEOUT_SECS` + `OM_MATCH_TICKET_DEACTIVATION_TIMEOUT_MS` ÷ 1000. Both are defined in `internal/config/config.go` and overridable by environment variables. With the default timeouts set in `internal/config/config.go`, that is 660 s. The Cloud Run maximum is 3600 s. You may need to adjust the scaling configuration and amount of CPU/memory `om-core` is allowed to use depending on your matchmaker.
+
+For GKE (`deploy/gke/om.yaml`), the `om-core` container configures a native `lifecycle.preStop.sleep.seconds: 10` hook (requiring Kubernetes 1.30 or later, letting the pod leave Service endpoints before `SIGTERM`) and Pod `terminationGracePeriodSeconds: 30`. The termination grace period must exceed the `preStop` sleep plus the graceful shutdown defaults in `start` (`server.go`, `5` s) and `main.go` (`3` s). Validate edited manifests before deploying with `python3 .agents/skills/open_match2/scripts/validate_deploy_config.py`.
 
 `core` is just a gRPC/HTTP golang application in a container image and can be deployed in most environments (local Docker/Minikube/Kubernetes/kNative) with a little effort. 
 
@@ -63,8 +67,14 @@ You can run the full Go unit test suite (with the race detector enabled) from th
 go test -race ./...
 ```
 
+The test suite supports two Redis-backed execution modes (plus a Redis-free fast loop):
+* **Local mode**: When `REDISHOST` is unset, `TestMain` (and `internal/statestore/redis`) tries Redis on `localhost:6379`; if unreachable, it automatically falls back to Testcontainers using `redis:7.0.10`. End users may change that Testcontainers image tag locally to try later Redis versions, which are untested and unsupported.
+* **Cloud mode**: In CI / Cloud Build, the build runner provides a Redis container or instance and sets `REDISHOST` and `REDISPORT` in the test environment, which `TestMain` uses directly for all read and write Redis connection settings.
+
+The supported Redis release line is **`7.2`** (the last 3-clause-BSD Redis release); Redis `7.4` and later may work, but are untested and unsupported.
+
 ### Running Unit Tests Without Redis or a Container Runtime
-By default, the `internal/statestore/redis` package uses Testcontainers to launch an ephemeral Redis container. If you are running in an environment without a local Redis server or container runtime (such as Cloud Shell or a restricted CI container), set `OM_SKIP_REDIS_TESTS=true` to run all unit and in-memory integration tests without Redis:
+If you are running in an environment without a local Redis server or container runtime (such as Cloud Shell or a restricted CI container), set `OM_SKIP_REDIS_TESTS=true` to run all unit and in-memory integration tests without Redis:
 ```
 OM_SKIP_REDIS_TESTS=true go test -race -count=1 ./...
 ```

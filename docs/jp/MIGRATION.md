@@ -1,6 +1,16 @@
 # **Open Match 2：技術的進化**
 
-このドキュメントでは、Open Match 1（OM1）とOpen Match 2（OM2）の詳細な技術的比較を行い、主要なアーキテクチャと設計の変更点に焦点を当てます。関連ドキュメントについては、[README.md](../../README.md)、[DEVELOPMENT.md](../DEVELOPMENT.md)、[ADVANCED.md](ADVANCED.md)、[METRICS.md](METRICS.md)、および[FAQ.md](FAQ.md)も参照してください。
+このドキュメントでは、Open Match 1（OM1）とOpen Match 2（OM2）の詳細な技術的比較と主要なアーキテクチャ・設計の変更点に加え、`v2.0.x`から`v2.1.0`へのアップグレード手順について解説します。関連ドキュメントについては、[README.md](../../README.md)、[DEVELOPMENT.md](../DEVELOPMENT.md)、[ADVANCED.md](ADVANCED.md)、[METRICS.md](METRICS.md)、および[FAQ.md](FAQ.md)も参照してください。
+
+## **v2.0.xからv2.1.0へのアップグレード**
+
+* **ワイヤ互換性とステートストレージ形式**: クライアント、Director、およびMMF向けのgRPC、Protobuf、HTTP `grpc-gateway`のワイヤ互換性は`v2.0.x`から変更ありません。また、`OM_CACHE_PACK_TICKET_STATE_UPDATES`が`false`（デフォルト）のままである限り、Redis Streams（`om-replication`）のステートストレージのエントリ*形式*も変更ありません。マッチメーカーのデプロイメントはRedisインスタンス、`om-core`インスタンス群、MMF、マッチメイキングキュー、Directorを含むスタック全体で構成されるため、`v2.1.0`はすべての`om-core`インスタンスが同じバージョンおよび設定で稼働する統一されたスタックとしてデプロイしてください。
+* **チケットライフサイクル（v2.0.xから変更なし）**: `CreateTicket`で作成されたすべてのチケットは`inactive`（非アクティブ）状態で開始され、`ActivateTickets`の呼び出し後にのみプールに入ります（`v2.0.x`から変更ありません）。チケットは**アクティブであるか非アクティブであるかにかかわらず**、その有効期限時刻に達すると期限切れになります。有効期限時刻のデフォルトは作成時刻に`OM_CACHE_TICKET_TTL_MS`（`internal/config/config.go`で定義）を加算した時刻であり、より早い時刻を設定することはできますが、現在時刻にそのTTLを加算した時刻より後に設定することはできません。
+* **パッキングされたチケット状態更新（`OM_CACHE_PACK_TICKET_STATE_UPDATES`）**: デプロイメント内のすべての`om-core`インスタンスは、同じバージョンかつ同じ`OM_CACHE_PACK_TICKET_STATE_UPDATES`設定で実行される必要があります。`v2.0.x`はパッキングされたエントリの最初のチケットIDのみを読み取り残りを無言で破棄するため、`v2.0.x`からパッキング有効の`v2.1.0`への直接アップグレードやそこからのロールバックを含め、いずれの方向でもライブ（ローリング）での設定変更やロールバックはサポートされません。この設定の有効化・無効化は、**新しいRedisインスタンスを含むスタック全体のブルーグリーンデプロイメント**（または新しいRedisインスタンスを用いたメンテナンスウィンドウ）によって実施してください。詳細は[パッキングされたチケット状態更新の有効化と無効化](ADVANCED.md#パッキングされたチケット状態更新の有効化と無効化)を参照してください。
+* **Cloud RunおよびGKEマニフェストの変更点**:
+  * **Cloud Run**（`deploy/cloud_run/service.yaml`、`deploy/cloud_run/cloudbuild.yaml`、`ci.yaml`）：デフォルトの`OM_LOGGING_LEVEL`が`info`に変更され、`core`コンテナに`2` CPUおよび`1Gi`メモリのリソース制限（`cpu: '2'`、`memory: 1Gi` / `--cpu 2`、`--memory 1Gi`）が追加され、リクエストタイムアウトが`900`秒（`timeoutSeconds: 900` / `--timeout 900`）に設定されました。Cloud Runのリクエストタイムアウトは、少なくとも`OM_MMF_TIMEOUT_SECS` + `OM_MATCH_TICKET_DEACTIVATION_TIMEOUT_MS` ÷ 1000以上である必要があります。これらはいずれも`internal/config/config.go`で定義されており、環境変数で上書き可能です。`internal/config/config.go`に設定されたデフォルトのタイムアウト値では660秒になります。Cloud Runの最大値は3600秒です。
+  * **GKE**（`deploy/gke/om.yaml`）：`om-core`コンテナにネイティブの`lifecycle.preStop.sleep.seconds: 10`フック（Kubernetes 1.30以降が必要、`SIGTERM`送信前にPodをServiceエンドポイントから切り離すため）が追加され、Pod仕様に`terminationGracePeriodSeconds: 30`（10秒の`preStop`スリープに加え、`server.go`の`start`における5秒と`main.go`における3秒のシャットダウンデフォルト値をカバー）が設定されました。
+* **最小Goバージョン**: `go.mod`の最小Goツールチェーンバージョンが**`1.27.4`**に設定されました（最小要件であり、Buildpackのバージョン固定ではありません）。
 
 ## **統一された柔軟なコアアーキテクチャとデプロイメント**
 
@@ -34,7 +44,7 @@ Open Match 2は、Redisへの直接クエリを置き換えるために、各`om
 
 OM2の設定システムは、よりシンプルで発見しやすく、モダンなクラウドネイティブ原則に沿うように全面的に作り直されました。すべての設定が環境変数を通じて管理される**12-Factor App手法**を完全に採用しています（テレメトリーおよびチューニングについては[METRICS.md](METRICS.md)および[FAQ.md](FAQ.md)を参照してください）。
 
-このアプローチにより、複雑なHelmチャートによって不透明に適用される階層化されたYAMLファイルで設定を管理する必要がなくなります。さらに重要なことに、すべての設定は単一のGoコードモジュール（`internal/config`）に一元化されています。このモジュールは、すべての設定変数、そのデフォルト値、および目的がコード内で直接定義・文書化される唯一の信頼できる情報源として機能します。`om-core`サービスが起動すると、使用しているすべての設定値が`debug`ログレベルで出力されます。値の更新は、環境変数の値を調整して新しい`om-core`デプロイメントを作成するだけで済み、GKEやCloud Runなどのクラウドネイティブプラットフォームで適切にサポートされています。
+このアプローチにより、複雑なHelmチャートによって不透明に適用される階層化されたYAMLファイルで設定を管理する必要がなくなります。さらに重要なことに、すべての設定は単一のGoコードモジュール（`internal/config`）に一元化されています。このモジュールは、すべての設定変数、そのデフォルト値、および目的がコード内で直接定義・文書化される唯一の信頼できる情報源として機能します。`om-core`サービスが起動すると、使用しているすべての設定値が`debug`ログレベルで出力されます。多くの設定値はGKEやCloud Runなどのプラットフォーム上で環境変数を調整した新しい`om-core`デプロイメントを作成することで更新できますが、`OM_CACHE_PACK_TICKET_STATE_UPDATES`の変更はストリームエントリの書き込み形式を変更するため、新しいRedisインスタンスを含むマッチメイキングスタック全体の新しいデプロイメントが必要です（[パッキングされたチケット状態更新の有効化と無効化](ADVANCED.md#パッキングされたチケット状態更新の有効化と無効化)を参照してください）。
 
 ## **マッチ解決とチケット衝突ハンドリング**
 
@@ -82,7 +92,7 @@ OM2で推奨されるアプローチは、**マッチメーカー**がすべて�
 | :---- | :---- | :---- |
 | `Assignment assignment` | *フィールド削除* | `Assignment`はもはや`Ticket`の状態の一部ではなくなり、マッチにゲームサーバーを割り当てるマッチメーカーからアサインメントを受け取る設計になったことを反映しています。 |
 | `SearchFields search_fields` | `FilterableData attributes` | 明確化のために名前が変更されました。このフィールドは引き続き検索可能なタグとフィルタリング用のキー/値データ（`Ticket.attributes`）を保持しますが、より論理的な名前になりました。 |
-| `google.protobuf.Timestamp create_time` | `Ticket.attributes.creation_time` (`FilterableData.creation_time`) および `Ticket.expiration_time` | 作成時刻はトップレベルの`Ticket`メッセージから他のフィルタリング可能な属性と同じ`Ticket.attributes.creation_time`（`FilterableData.creation_time`）に移動しました（省略時はサーバータイムスタンプが設定されます）。また、トップレベルの`expiration_time`フィールドが`Ticket`に追加され、未設定の場合は`creation_time`に`OM_CACHE_TICKET_TTL_MS`を加算した値がデフォルトとして適用されます。 |
+| `google.protobuf.Timestamp create_time` | `Ticket.attributes.creation_time` (`FilterableData.creation_time`) および `Ticket.expiration_time` | 作成時刻はトップレベルの`Ticket`メッセージから他のフィルタリング可能な属性と同じ`Ticket.attributes.creation_time`（`FilterableData.creation_time`）に移動しました（省略時はサーバータイムスタンプが設定されます）。また、トップレベルの`expiration_time`フィールドが`Ticket`に追加され、デフォルトは作成時刻に`OM_CACHE_TICKET_TTL_MS`（`internal/config/config.go`で定義）を加算した時刻となります。作成時により早い時刻を設定できますが、現在時刻にそのTTLを加算した時刻より後には設定できません。 |
 
 #### **4\. チケットIDの生成**
 
@@ -102,7 +112,7 @@ ticket.attributes.string_args["custom_id"] = "your-unique-game-id"
 
 Open Match 2におけるチケットのライフサイクルは、OM1とは根本的に異なります。手動での削除はサポートされなくなり、自動化された時間ベースの有効期限切れシステムに置き換えられました。
 
-マッチメイキングの対象からチケットを削除するには、`DeactivateTickets` RPCを使用して非アクティブ化する必要があります。これにより、チケットは「非アクティブ」セットに移動され、将来のマッチメイキング機能では無視されます。すべてのチケットは、有効期限に達するとシステムから自動的に削除されます。チケット作成時に`expiration_time`フィールドを設定できます。未設定の場合、`Ticket.attributes.creation_time`に`om-core`構成の`OM_CACHE_TICKET_TTL_MS`環境変数を加算したデフォルトのチケット生存期間（TTL）が適用されます。`expiration_time`は作成後に変更できません。チケットの寿命を延ばす必要がある場合は、チケットを再作成する必要があります。これらの再作成を跨いでチケットの優先度を維持する必要があるユースケース（例：スターベーションの防止）では、`extensions`フィールドにカスタムタイムスタンプを追加し、MMFがそれを考慮するようにコーディングする必要があります（[ADVANCED.md](ADVANCED.md#長寿命チケットの取り扱い)を参照してください）。
+`CreateTicket`で作成されたすべてのチケットは`inactive`（非アクティブ）状態で開始され、`ActivateTickets`の呼び出し後にのみプールに入ります（`v2.0.x`から変更ありません）。マッチメイキングの対象からチケットを除外するには、`DeactivateTickets` RPCを使用して非アクティブ化し、将来のマッチメイキング機能が無視する「非アクティブ」セットに移します。すべてのチケットは、**アクティブであるか非アクティブであるかにかかわらず**、その有効期限時刻に達するとシステムから自動的に削除されます。有効期限時刻（`expiration_time`）のデフォルトは、作成時刻に`OM_CACHE_TICKET_TTL_MS`（`internal/config/config.go`で定義）を加算した時刻であり、作成時により早い時刻を設定することはできますが、現在時刻にそのTTLを加算した時刻より後に設定することはできません。`expiration_time`は作成後に変更できないため、チケットの寿命を延ばす必要がある場合は再作成してください。再作成を跨いで優先度を維持する必要があるユースケース（例：スターベーションの防止）では、`extensions`フィールドにカスタムタイムスタンプを追加し、MMFがそれを考慮するようにコーディングする必要があります（[ADVANCED.md](ADVANCED.md#長寿命チケットの取り扱い)を参照してください）。
 
 この新しいライフサイクルモデルには、いくつかの重要な利点があります。削除を自動TTL有効期限切れメカニズムにオフロードすることで、**`om-core`のコードが大幅に簡素化**されます。この設計は、すべてのチケットに保証された最大寿命があるため、バグや競合状態によってチケットがシステムに「リーク」する（滞留する）**以前の原因の多くを排除します**。その結果、**開発者は古いチケットや放棄されたチケットをガベージコレクションするための手動クリーンアップツールを構築または実行する必要がなくなります**。システムは設計上、自己クリーンアップ機能を備えています。
 

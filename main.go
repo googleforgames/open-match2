@@ -133,6 +133,13 @@ var (
 	})
 )
 
+// replicationStopTimeout bounds how long main waits for the outgoing and incoming
+// replication queues to stop after start() has drained HTTP and gRPC traffic.
+// Combined with serverDrainTimeout (5s in server.go), the 5s + 3s = 8s shutdown
+// budget fits within Cloud Run's 10s SIGTERM-to-SIGKILL window and exceeds the
+// default OM_CACHE_IN_WAIT_TIMEOUT_MS (1500ms in internal/config/config.go).
+const replicationStopTimeout = 3 * time.Second
+
 func main() {
 	// Read configuration env vars, and configure logging
 	cfg = config.Read()
@@ -199,12 +206,39 @@ func main() {
 	}
 	tc.Init(cfg, replicator)
 
-	// These goroutines send and receive cache updates from state storage
-	go tc.OutgoingReplicationQueue(ctx)
-	go tc.IncomingReplicationQueue(ctx)
+	// Run both replication queues on their own cancellable context detached from
+	// the termination signal so in-flight RPCs can finish replicating while the
+	// HTTP and gRPC servers drain in start().
+	replCtx, replCancel := context.WithCancel(context.WithoutCancel(ctx))
+	defer replCancel()
+	var replWg sync.WaitGroup
+	replWg.Add(2)
+	go func() {
+		defer replWg.Done()
+		tc.OutgoingReplicationQueue(replCtx)
+	}()
+	go func() {
+		defer replWg.Done()
+		tc.IncomingReplicationQueue(replCtx)
+	}()
 
-	// Start the gRPC server
+	// Start the gRPC and HTTP servers (returns after graceful server drain).
 	start(ctx, cfg)
+
+	// Stop replication queues after the servers have drained. The 5s server drain
+	// default in start() plus this 3s replication-stop default fit inside Cloud Run's
+	// 10s SIGTERM-to-SIGKILL window, and finish before the deferred replicator Close().
+	replCancel()
+	replDone := make(chan struct{})
+	go func() {
+		replWg.Wait()
+		close(replDone)
+	}()
+	select {
+	case <-replDone:
+	case <-time.After(replicationStopTimeout):
+		logger.Warnf("Timed out after %v waiting for replication queues to stop", replicationStopTimeout)
+	}
 
 	// Dump the final state of the cache to the log for debugging.
 	if cfg.GetBool("OM_VERBOSE") {

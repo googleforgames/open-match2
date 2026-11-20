@@ -71,6 +71,8 @@ func streamPanicRecoveryInterceptor(srv any, ss grpc.ServerStream, info *grpc.St
 	return handler(srv, ss)
 }
 
+const serverDrainTimeout = 5 * time.Second
+
 // start brings up the gRPC and HTTP gateway servers based on the configuration
 // and shuts them down gracefully when parentCtx is cancelled or a termination signal arrives.
 func start(parentCtx context.Context, cfg *viper.Viper) {
@@ -82,6 +84,12 @@ func start(parentCtx context.Context, cfg *viper.Viper) {
 	// SIGINT is signaled when running locally and hitting Ctrl+C.
 	ctx, stop := signal.NotifyContext(parentCtx, syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+
+	// Derive the grpc-gateway context from a non-cancelling copy of parentCtx so
+	// its internal gRPC client connection stays open while httpServer.Shutdown
+	// drains in-flight REST requests, and cancel it explicitly afterward.
+	gwCtx, gwCancel := context.WithCancel(context.WithoutCancel(parentCtx))
+	defer gwCancel()
 
 	var wg sync.WaitGroup
 
@@ -112,7 +120,7 @@ func start(parentCtx context.Context, cfg *viper.Viper) {
 	logger.Infof("Open Match Server starting HTTP gRPC proxy on port %v", cfg.GetString("PORT"))
 	mux := runtime.NewServeMux()
 	err = gw.RegisterOpenMatchServiceHandlerFromEndpoint(
-		ctx,
+		gwCtx,
 		mux,
 		"localhost:"+cfg.GetString("OM_GRPC_PORT"),
 		[]grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())},
@@ -134,16 +142,24 @@ func start(parentCtx context.Context, cfg *viper.Viper) {
 	}()
 	logger.Debugf("Open Match Core http server started")
 
-	// Wait for context cancellation or termination signal.
+	// Graceful shutdown order:
+	// 1. Wait for termination signal or parent context cancellation.
+	// 2. Drain in-flight HTTP requests via httpServer.Shutdown while gwCtx keeps the
+	//    grpc-gateway client connection open.
+	// 3. Cancel gwCtx to close the grpc-gateway client connection.
+	// 4. Run omServer.GracefulStop under the shared serverDrainTimeout (5s) deadline,
+	//    falling back to omServer.Stop if the deadline expires.
 	<-ctx.Done()
 	stop()
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), serverDrainTimeout)
 	defer shutdownCancel()
 
 	if shutdownErr := httpServer.Shutdown(shutdownCtx); shutdownErr != nil {
 		logger.Warnf("HTTP server shutdown error: %v", shutdownErr)
 	}
+
+	gwCancel()
 
 	grpcDone := make(chan struct{})
 	go func() {

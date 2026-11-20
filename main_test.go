@@ -27,6 +27,7 @@ import (
 	"log"
 	"math/big"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"regexp"
@@ -2304,6 +2305,37 @@ func TestMetricsCardinalityInvalidIdCountingAndWatchSpelling(t *testing.T) {
 	assert.False(t, foundMisspelled)
 }
 
+type blockingFirstSendReplicator struct {
+	base          store.StateReplicator
+	firstSendOnce sync.Once
+	sendStarted   chan struct{}
+	releaseSend   chan struct{}
+}
+
+func newBlockingFirstSendReplicator(base store.StateReplicator) *blockingFirstSendReplicator {
+	return &blockingFirstSendReplicator{
+		base:        base,
+		sendStarted: make(chan struct{}),
+		releaseSend: make(chan struct{}),
+	}
+}
+
+func (b *blockingFirstSendReplicator) GetUpdates() []*store.StateUpdate {
+	return b.base.GetUpdates()
+}
+
+func (b *blockingFirstSendReplicator) SendUpdates(updates []*store.StateUpdate) []*store.StateResponse {
+	b.firstSendOnce.Do(func() {
+		close(b.sendStarted)
+		<-b.releaseSend
+	})
+	return b.base.SendUpdates(updates)
+}
+
+func (b *blockingFirstSendReplicator) GetReplIdValidator() *regexp.Regexp {
+	return b.base.GetReplIdValidator()
+}
+
 // Scenario 16: Context Cancellation and Graceful Server Shutdown
 func TestContextCancellationAndGracefulServerShutdown(t *testing.T) {
 	t.Run("BlockedEnqueueRespectsContextCancellation", func(t *testing.T) {
@@ -2417,6 +2449,104 @@ func TestContextCancellationAndGracefulServerShutdown(t *testing.T) {
 			assert.Less(t, time.Since(shutdownStart), 2*time.Second)
 		case <-time.After(2 * time.Second):
 			t.Fatal("start() did not shut down gRPC and HTTP servers within 2 seconds")
+		}
+	})
+
+	t.Run("InFlightRESTRequestDrainsDuringShutdown", func(t *testing.T) {
+		localCfg := newFastCoreTestConfig()
+		blockingRepl := newBlockingFirstSendReplicator(memoryReplicator.New(localCfg))
+		setupGlobalTestCache(t, localCfg, blockingRepl)
+
+		lGrpc, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		grpcPort := lGrpc.Addr().(*net.TCPAddr).Port
+		require.NoError(t, lGrpc.Close())
+
+		lHttp, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		httpPort := lHttp.Addr().(*net.TCPAddr).Port
+		require.NoError(t, lHttp.Close())
+
+		srvCfg := newFastCoreTestConfig()
+		srvCfg.Set("OM_GRPC_PORT", strconv.Itoa(grpcPort))
+		srvCfg.Set("PORT", strconv.Itoa(httpPort))
+
+		srvCtx, srvCancel := context.WithCancel(context.Background())
+		defer srvCancel()
+		done := make(chan struct{})
+		go func() {
+			start(srvCtx, srvCfg)
+			close(done)
+		}()
+
+		require.Eventually(t, func() bool {
+			c1, err1 := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", grpcPort), 50*time.Millisecond)
+			if err1 != nil {
+				return false
+			}
+			_ = c1.Close()
+			c2, err2 := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", httpPort), 50*time.Millisecond)
+			if err2 != nil {
+				return false
+			}
+			_ = c2.Close()
+			return true
+		}, 3*time.Second, 15*time.Millisecond)
+
+		type httpResult struct {
+			statusCode int
+			body       string
+			err        error
+		}
+		resCh := make(chan httpResult, 1)
+		go func() {
+			resp, postErr := http.Post(
+				fmt.Sprintf("http://127.0.0.1:%d/tickets", httpPort),
+				"application/json",
+				strings.NewReader(`{"ticket":{"attributes":{"tags":["drain"]}}}`),
+			)
+			if postErr != nil {
+				resCh <- httpResult{err: postErr}
+				return
+			}
+			defer resp.Body.Close()
+			bodyBytes, readErr := io.ReadAll(resp.Body)
+			resCh <- httpResult{
+				statusCode: resp.StatusCode,
+				body:       string(bodyBytes),
+				err:        readErr,
+			}
+		}()
+
+		select {
+		case <-blockingRepl.sendStarted:
+		case <-time.After(3 * time.Second):
+			close(blockingRepl.releaseSend)
+			t.Fatal("timed out waiting for in-flight REST CreateTicket to reach blocking replicator")
+		}
+
+		shutdownStart := time.Now()
+		srvCancel()
+		time.Sleep(200 * time.Millisecond)
+		close(blockingRepl.releaseSend)
+
+		var httpRes httpResult
+		select {
+		case httpRes = <-resCh:
+		case <-time.After(3 * time.Second):
+			t.Fatal("timed out waiting for in-flight REST CreateTicket HTTP response")
+		}
+
+		require.NoError(t, httpRes.err)
+		assert.Equal(t, http.StatusOK, httpRes.statusCode, "unexpected status code with body: %s", httpRes.body)
+		assert.Contains(t, httpRes.body, "ticketId")
+		assert.NotContains(t, httpRes.body, "client connection is closing")
+
+		select {
+		case <-done:
+			assert.Less(t, time.Since(shutdownStart), 3*time.Second)
+		case <-time.After(3 * time.Second):
+			t.Fatal("start() did not return within bounded time after draining in-flight REST request")
 		}
 	})
 }
